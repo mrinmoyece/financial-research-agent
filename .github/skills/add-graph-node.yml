@@ -1,0 +1,56 @@
+name: add-graph-node
+description: Add a new processing node to the LangGraph research workflow
+version: "1.0"
+
+steps:
+  - name: Create node function
+    prompt: |
+      Create a new node function in `src/agents/<name>_agent.py`:
+      
+      ```python
+      from typing import Any
+      from src.models.state import AgentState
+      
+      def <name>_node(state: AgentState) -> dict[str, Any]:
+          """
+          LangGraph node: <description of responsibility>.
+          
+          Receives fully populated state from upstream nodes.
+          Returns partial state update — LangGraph merges via operator.add reducers.
+          """
+          ...
+          return {"field_to_update": value}
+      ```
+      
+      Rules:
+      - Never mutate the input `state` dict
+      - Return only the fields this node updates
+      - Log at INFO level: entry, exit, key metrics
+      - Handle exceptions: return `{"error": str(exc)}` rather than raising
+
+  - name: Add state fields
+    prompt: |
+      If the new node produces new data, add fields to `AgentState` in `src/models/state.py`:
+      - If the field accumulates across parallel branches: `Annotated[list[T], operator.add]`
+      - If the field is a single value set once: plain typed field
+
+  - name: Wire into graph
+    prompt: |
+      In `src/graph/workflow.py`:
+      1. Import the new node function
+      2. Register with `builder.add_node("<name>_node", <name>_node)`
+      3. Add edges: `builder.add_edge("<upstream>", "<name>_node")`
+         or conditional: `builder.add_conditional_edges("<upstream>", route_fn)`
+      4. Define routing function if needed:
+         ```python
+         def route_after_<upstream>(state: AgentState) -> Literal["<name>_node", "__end__"]:
+             if state.get("error"): return END
+             return "<name>_node"
+         ```
+
+  - name: Write tests
+    prompt: |
+      In `tests/unit/test_workflow.py`:
+      - Test the routing logic directly (no LLM needed)
+      - Test the node function with a pre-populated mock state
+      - Verify the node returns the correct partial state keys

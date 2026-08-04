@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Use GitHub Models free tier in CI — no Azure key needed
+  LLM_PROVIDER: github_models
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # All data API keys absent — tools fall back to mock data automatically
+  ALPHA_VANTAGE_API_KEY: ""
+  NEWSAPI_API_KEY: ""
+  LANGCHAIN_TRACING_V2: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Secret scan ───────────────────────────────────────────────────────────
+  secrets-scan:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.27.1/gitleaks_8.27.1_linux_x64.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+      - name: Run Gitleaks
+        run: ./gitleaks detect --source . --no-banner --redact --exit-code 1
+
+  # ── Lint & format ─────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install ruff mypy
+      - run: ruff check src/ tests/
+      - run: ruff format --check src/ tests/
+      - run: mypy src/ --ignore-missing-imports
+
+  # ── Security scan ─────────────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install bandit safety
+      - name: Bandit SAST
+        run: bandit -r src/ -ll --skip B101
+      - name: Dependency vulnerability scan
+        run: safety check -r requirements.txt
+
+  # ── Unit tests ────────────────────────────────────────────────────────────
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  # ── Integration tests ─────────────────────────────────────────────────────
+  test-integration:
+    name: Integration Tests (API)
+    runs-on: ubuntu-latest
+    needs: test-unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run integration tests
+        run: pytest tests/integration/ -v --timeout=60
+
+  # ── Docker build ──────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker Build & Scan
+    runs-on: ubuntu-latest
+    needs: test-unit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t financial-research-agent:ci .
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: financial-research-agent:ci
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          ignore-unfixed: true
+
+  # ── Push to registry ──────────────────────────────────────────────────────
+  push:
+    name: Push to Container Registry
+    runs-on: ubuntu-latest
+    needs: [test-integration, docker-build]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

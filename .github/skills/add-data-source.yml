@@ -1,0 +1,76 @@
+name: add-data-source
+description: Add a new external data source tool to the financial research agent
+version: "1.0"
+
+steps:
+  - name: Create tool file
+    prompt: |
+      Create a new LangChain tool in `src/tools/<name>_tool.py` following this template:
+      
+      ```python
+      import logging
+      from langchain_core.tools import tool
+      from tenacity import retry, stop_after_attempt, wait_exponential
+      from src.config.settings import get_settings
+      
+      logger = logging.getLogger(__name__)
+      
+      _MOCK_<NAME>: <ReturnType> = <mock_data>
+      
+      @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
+      def _fetch_<name>(args, api_key: str) -> dict:
+          ...  # actual HTTP call via httpx
+      
+      @tool
+      def get_<name>(arg: str) -> <ReturnType>:
+          """
+          <Clear description of what this tool returns>.
+          
+          Args:
+              arg: <description>
+          
+          Returns:
+              <ReturnType description>
+          """
+          logger.info("<name>_tool: fetching arg=%s", arg)
+          api_key = get_settings().<api_key_field>.get_secret_value()
+          if not api_key:
+              logger.warning("<name>_tool: key absent — returning mock data")
+              return _MOCK_<NAME>
+          try:
+              return _fetch_<name>(arg, api_key)
+          except Exception as exc:
+              logger.error("<name>_tool error=%s", exc, exc_info=True)
+              return _MOCK_<NAME>
+      ```
+
+  - name: Register tool
+    prompt: |
+      In `src/agents/research_agent.py`:
+      1. Import the new tool at the top
+      2. Add it to the `RESEARCH_TOOLS` list
+      3. Update `_SYSTEM_PROMPT` to describe when to call it
+
+  - name: Add config
+    prompt: |
+      In `src/config/settings.py`:
+      - Add `<service>_api_key: SecretStr = SecretStr("")` field
+      In `.env.example`:
+      - Add `<SERVICE>_API_KEY=your-key-here` with a link to sign up
+
+  - name: Add mock data
+    prompt: |
+      Add realistic mock data to `_MOCK_<NAME>` that represents a typical API response.
+      Mock data must be sufficient for tests to run without API keys.
+
+  - name: Write tests
+    prompt: |
+      In `tests/unit/test_tools.py`, add a `TestNewTool` class with:
+      - `test_returns_expected_type` — verifies return type
+      - `test_handles_unknown_input` — verifies graceful fallback
+      - `test_returns_all_required_fields` — field completeness
+      All tests must pass with no API keys set.
+
+  - name: Update agent.md
+    prompt: |
+      In `.github/agent.md`, update the architecture diagram to include the new tool.
