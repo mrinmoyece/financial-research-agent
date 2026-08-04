@@ -1,0 +1,225 @@
+# ── Namespace ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentforge
+---
+# ── Secret (create manually — never commit real values) ───────────────────────
+# kubectl create secret generic financial-research-agent-secrets \
+#   --namespace agentforge \
+#   --from-literal=AZURE_OPENAI_API_KEY=<value> \
+#   --from-literal=ALPHA_VANTAGE_API_KEY=<value> \
+#   --from-literal=NEWSAPI_API_KEY=<value> \
+#   --from-literal=LANGSMITH_API_KEY=<value>
+---
+# ── ConfigMap (non-sensitive config) ──────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: financial-research-agent-config
+  namespace: agentforge
+data:
+  LLM_PROVIDER: "azure_openai"
+  AZURE_OPENAI_API_VERSION: "2024-02-01"
+  AZURE_CHAT_DEPLOYMENT: "gpt-4o"
+  LLM_TEMPERATURE: "0.1"
+  LLM_MAX_TOKENS: "4096"
+  REACT_MAX_ITERATIONS: "15"
+  LANGCHAIN_TRACING_V2: "true"
+  LANGSMITH_PROJECT: "financial-research-agent-prod"
+  API_PORT: "8080"
+  API_WORKERS: "4"
+  REDIS_URL: "redis://financial-research-redis:6379"
+---
+# ── Deployment ─────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: financial-research-agent
+  namespace: agentforge
+  labels:
+    app: financial-research-agent
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: financial-research-agent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: financial-research-agent
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: ghcr.io/YOUR_ORG/financial-research-agent:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: financial-research-agent-config
+          env:
+            - name: AZURE_OPENAI_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: financial-research-agent-secrets
+                  key: AZURE_OPENAI_ENDPOINT
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: financial-research-agent-secrets
+                  key: AZURE_OPENAI_API_KEY
+            - name: ALPHA_VANTAGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: financial-research-agent-secrets
+                  key: ALPHA_VANTAGE_API_KEY
+            - name: NEWSAPI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: financial-research-agent-secrets
+                  key: NEWSAPI_API_KEY
+            - name: LANGSMITH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: financial-research-agent-secrets
+                  key: LANGSMITH_API_KEY
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+---
+# ── Service ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: financial-research-agent
+  namespace: agentforge
+spec:
+  selector:
+    app: financial-research-agent
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+# ── HorizontalPodAutoscaler ────────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: financial-research-agent-hpa
+  namespace: agentforge
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: financial-research-agent
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+# ── Redis ──────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: financial-research-redis
+  namespace: agentforge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: financial-research-redis
+  template:
+    metadata:
+      labels:
+        app: financial-research-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: financial-research-redis
+  namespace: agentforge
+spec:
+  selector:
+    app: financial-research-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  type: ClusterIP
