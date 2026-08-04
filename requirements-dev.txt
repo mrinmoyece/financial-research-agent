@@ -1,0 +1,8 @@
+-r requirements.txt
+
+# ── Dev extras ────────────────────────────────────────────────────────────────
+ruff==0.6.9                # linter + formatter
+mypy==1.11.2               # static type checker
+pre-commit==3.8.0          # git hooks
+ipykernel==6.29.5          # Jupyter for interactive exploration
+langchain-cli==0.0.25      # LangSmith CLI for tracing
