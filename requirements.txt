@@ -7,7 +7,7 @@ langchain-openai==1.0.0
 
 # ── API server ────────────────────────────────────────────────────────────────
 fastapi==0.115.4
-uvicorn[standard]==0.32.0
+uvicorn[standard]==0.52.1
 prometheus-fastapi-instrumentator==7.0.0
 
 # ── Configuration ─────────────────────────────────────────────────────────────
