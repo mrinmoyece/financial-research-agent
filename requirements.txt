@@ -24,7 +24,7 @@ redis[hiredis]==5.1.1
 tenacity==9.0.0
 
 # ── Observability ─────────────────────────────────────────────────────────────
-python-json-logger==2.0.7
+python-json-logger==4.1.0
 opentelemetry-sdk==1.27.0
 opentelemetry-instrumentation-fastapi==0.48b0
 
