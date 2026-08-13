@@ -33,15 +33,20 @@ steps:
               <ReturnType description>
           """
           logger.info("<name>_tool: fetching arg=%s", arg)
-          api_key = get_settings().<api_key_field>.get_secret_value()
+          settings = get_settings()
+          api_key = settings.<api_key_field>.get_secret_value()
           if not api_key:
-              logger.warning("<name>_tool: key absent — returning mock data")
-              return _MOCK_<NAME>
+              if settings.allow_mock_data:
+                  logger.warning("<name>_tool: key absent — returning illustrative data")
+                  return _MOCK_<NAME>
+              return {"error": "<service> is not configured"}
           try:
               return _fetch_<name>(arg, api_key)
           except Exception as exc:
               logger.error("<name>_tool error=%s", exc, exc_info=True)
-              return _MOCK_<NAME>
+              if settings.allow_mock_data:
+                  return _MOCK_<NAME>
+              return {"error": "<service> request failed"}
       ```
 
   - name: Register tool
@@ -60,8 +65,8 @@ steps:
 
   - name: Add mock data
     prompt: |
-      Add realistic mock data to `_MOCK_<NAME>` that represents a typical API response.
-      Mock data must be sufficient for tests to run without API keys.
+      Add clearly illustrative data to `_MOCK_<NAME>` for offline tests.
+      Never return it when `ALLOW_MOCK_DATA=false`.
 
   - name: Write tests
     prompt: |
@@ -69,6 +74,7 @@ steps:
       - `test_returns_expected_type` — verifies return type
       - `test_handles_unknown_input` — verifies graceful fallback
       - `test_returns_all_required_fields` — field completeness
+      - `test_fails_closed_when_mock_data_disabled` — no illustrative production fallback
       All tests must pass with no API keys set.
 
   - name: Update agent.md

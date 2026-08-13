@@ -5,19 +5,21 @@ Tests the graph routing logic without calling real LLMs — we mock
 the agent nodes to verify conditional edges and state propagation.
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+import pytest
+
+import src.graph.workflow as workflow
 from src.models.state import AgentState
-from src.graph.workflow import (
-    validate_input,
-    route_after_research,
-    route_after_validation,
-)
+
+build_graph = workflow.build_graph
+route_after_research = workflow.route_after_research
+route_after_validation = workflow.route_after_validation
+run_research = workflow.run_research
+validate_input = workflow.validate_input
 
 
 class TestValidateInput:
-
     def _base_state(self, **overrides) -> AgentState:
         return {
             "query": "Analyse NVDA",
@@ -68,12 +70,18 @@ class TestValidateInput:
 
 
 class TestConditionalRouting:
-
     def _state(self, **kwargs) -> AgentState:
         return {
-            "query": "test", "tickers": ["NVDA"], "research_depth": "standard",
-            "ticker_analyses": [], "news_items": [], "macro_indicators": [],
-            "tool_calls_log": [], "messages": [], "report": None, "error": None,
+            "query": "test",
+            "tickers": ["NVDA"],
+            "research_depth": "standard",
+            "ticker_analyses": [],
+            "news_items": [],
+            "macro_indicators": [],
+            "tool_calls_log": [],
+            "messages": [],
+            "report": None,
+            "error": None,
             **kwargs,
         }
 
@@ -88,11 +96,20 @@ class TestConditionalRouting:
         assert result == "__end__"
 
     def test_route_after_research_proceeds_with_data(self):
-        ta = {"ticker": "NVDA", "company_name": "NVIDIA", "sector": "Tech",
-              "price": 875.0, "market_cap_billions": 2150.0,
-              "pe_ratio": 68.0, "revenue_growth_yoy": 0.94,
-              "free_cash_flow_margin": 0.42, "analyst_consensus": "BUY",
-              "target_price": 1050.0, "key_risks": [], "key_catalysts": []}
+        ta = {
+            "ticker": "NVDA",
+            "company_name": "NVIDIA",
+            "sector": "Tech",
+            "price": 875.0,
+            "market_cap_billions": 2150.0,
+            "pe_ratio": 68.0,
+            "revenue_growth_yoy": 0.94,
+            "free_cash_flow_margin": 0.42,
+            "analyst_consensus": "BUY",
+            "target_price": 1050.0,
+            "key_risks": [],
+            "key_catalysts": [],
+        }
         state = self._state(ticker_analyses=[ta])
         result = route_after_research(state)
         assert result == "analyst_node"
@@ -106,3 +123,28 @@ class TestConditionalRouting:
         state = self._state(ticker_analyses=[], news_items=[])
         result = route_after_research(state)
         assert result == "__end__"
+
+
+def test_build_graph_and_singleton():
+    workflow._graph = None
+    graph = build_graph()
+    assert graph is not None
+    with patch("src.graph.workflow.build_graph", return_value=graph) as builder:
+        workflow._graph = None
+        assert workflow.get_graph() is graph
+        assert workflow.get_graph() is graph
+        builder.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_research_invokes_graph_and_validates_depth():
+    final_state = TestConditionalRouting()._state()
+    graph = AsyncMock()
+    graph.ainvoke.return_value = final_state
+    with patch("src.graph.workflow.get_graph", return_value=graph):
+        result = await run_research("Analyse NVDA", ["NVDA"], "quick")
+    assert result == final_state
+    graph.ainvoke.assert_awaited_once()
+
+    with pytest.raises(ValueError, match="Invalid research_depth"):
+        await run_research("Analyse NVDA", ["NVDA"], "invalid")

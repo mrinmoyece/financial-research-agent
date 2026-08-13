@@ -7,10 +7,13 @@ metadata:
 # ── Secret (create manually — never commit real values) ───────────────────────
 # kubectl create secret generic financial-research-agent-secrets \
 #   --namespace agentforge \
+#   --from-literal=AZURE_OPENAI_ENDPOINT=https://YOUR_RESOURCE.openai.azure.com/ \
 #   --from-literal=AZURE_OPENAI_API_KEY=<value> \
 #   --from-literal=ALPHA_VANTAGE_API_KEY=<value> \
 #   --from-literal=NEWSAPI_API_KEY=<value> \
-#   --from-literal=LANGSMITH_API_KEY=<value>
+#   --from-literal=LANGSMITH_API_KEY=<value> \
+#   --from-literal=API_PRINCIPALS_JSON='<principal JSON from your secret manager>' \
+#   --from-literal=REDIS_URL=rediss://<managed-redis-endpoint>:6379
 ---
 # ── ConfigMap (non-sensitive config) ──────────────────────────────────────────
 apiVersion: v1
@@ -25,11 +28,30 @@ data:
   LLM_TEMPERATURE: "0.1"
   LLM_MAX_TOKENS: "4096"
   REACT_MAX_ITERATIONS: "15"
+  MAX_MODEL_CALLS_PER_JOB: "20"
+  MAX_TOOL_CALLS_PER_JOB: "30"
+  MAX_EXTERNAL_CONTENT_CHARS: "12000"
+  PROMPT_INJECTION_POLICY: "block"
+  LLM_FALLBACK_PROVIDERS: "openai"
   LANGCHAIN_TRACING_V2: "true"
   LANGSMITH_PROJECT: "financial-research-agent-prod"
   API_PORT: "8080"
   API_WORKERS: "4"
-  REDIS_URL: "redis://financial-research-redis:6379"
+  REDIS_REQUIRED: "true"
+  ALLOW_MOCK_DATA: "false"
+  API_AUTH_REQUIRED: "true"
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "60"
+  MAX_CONCURRENT_JOBS_PER_TENANT: "10"
+  REQUIRE_REPORT_APPROVAL: "true"
+  JOB_MAX_ATTEMPTS: "3"
+  JOB_RETENTION_SECONDS: "2592000"
+  JOB_LEASE_SECONDS: "300"
+  JOB_POLL_TIMEOUT_SECONDS: "5"
+  CIRCUIT_BREAKER_FAILURE_THRESHOLD: "3"
+  CIRCUIT_BREAKER_RECOVERY_SECONDS: "60"
+  MAX_REQUEST_BODY_BYTES: "65536"
+  EXPOSE_API_DOCS: "false"
+  CORS_ALLOW_ORIGINS: "https://research.example.com"
 ---
 # ── Deployment ─────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
@@ -42,6 +64,8 @@ metadata:
     version: "1.0.0"
 spec:
   replicas: 2
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
   selector:
     matchLabels:
       app: financial-research-agent
@@ -60,17 +84,19 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1001
-        runAsGroup: 1001
-        fsGroup: 1001
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: ghcr.io/YOUR_ORG/financial-research-agent:latest
-          imagePullPolicy: Always
+          image: ghcr.io/YOUR_ORG/financial-research-agent@sha256:REPLACE_WITH_IMAGE_DIGEST
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
@@ -78,6 +104,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: financial-research-agent-config
+            - secretRef:
+                name: financial-research-agent-secrets
           env:
             - name: AZURE_OPENAI_ENDPOINT
               valueFrom:
@@ -119,6 +147,12 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 12
           readinessProbe:
             httpGet:
               path: /api/v1/ready
@@ -139,6 +173,85 @@ spec:
         - name: tmp
           emptyDir: {}
       terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: financial-research-agent
+---
+# ── Durable worker Deployment ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: financial-research-worker
+  namespace: agentforge
+  labels:
+    app: financial-research-worker
+    version: "1.0.0"
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: financial-research-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: financial-research-worker
+        version: "1.0.0"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 330
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/YOUR_ORG/financial-research-agent@sha256:REPLACE_WITH_IMAGE_DIGEST
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "src.worker"]
+          envFrom:
+           - configMapRef:
+               name: financial-research-agent-config
+           - secretRef:
+               name: financial-research-agent-secrets
+          resources:
+           requests:
+             cpu: "250m"
+             memory: "512Mi"
+           limits:
+             cpu: "1000m"
+             memory: "2Gi"
+          securityContext:
+           allowPrivilegeEscalation: false
+           readOnlyRootFilesystem: true
+           capabilities:
+             drop: ["ALL"]
+          volumeMounts:
+           - name: tmp
+             mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+           matchLabels:
+             app: financial-research-worker
 ---
 # ── Service ────────────────────────────────────────────────────────────────────
 apiVersion: v1
@@ -182,44 +295,13 @@ spec:
           type: Utilization
           averageUtilization: 80
 ---
-# ── Redis ──────────────────────────────────────────────────────────────────────
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
-  name: financial-research-redis
+  name: financial-research-agent
   namespace: agentforge
 spec:
-  replicas: 1
+  minAvailable: 1
   selector:
     matchLabels:
-      app: financial-research-redis
-  template:
-    metadata:
-      labels:
-        app: financial-research-redis
-    spec:
-      containers:
-        - name: redis
-          image: redis:7-alpine
-          ports:
-            - containerPort: 6379
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "200m"
-              memory: "256Mi"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: financial-research-redis
-  namespace: agentforge
-spec:
-  selector:
-    app: financial-research-redis
-  ports:
-    - port: 6379
-      targetPort: 6379
-  type: ClusterIP
+      app: financial-research-agent

@@ -2,7 +2,7 @@
 
 ## Project overview
 LangGraph stateful multi-node agentic workflow for autonomous equity research.
-Stack: Python 3.12 · LangChain 0.2 · LangGraph 0.2 · FastAPI · Pydantic v2
+Stack: Python 3.12 · LangChain 1.3 · LangGraph 1.2 · FastAPI · Pydantic v2
 
 ## Architecture
 ```
@@ -38,10 +38,10 @@ AgentState (TypedDict with operator.add reducers)
 ## Tool development rules
 - Every new tool MUST:
   1. Use `@tool` decorator with a clear docstring explaining args and return type
-  2. Degrade gracefully to mock data when API keys are absent
+  2. Return illustrative data only when `ALLOW_MOCK_DATA=true`; production fails closed
   3. Have `@retry` with `stop_after_attempt(3)` and `wait_exponential`
   4. Log at INFO level on entry, ERROR on failure
-  5. Never raise unhandled exceptions — return `{"error": str(exc)}` instead
+  5. Log provider details server-side and return a non-sensitive error contract
 - Tool mock data lives in `_MOCK_*` module-level constants
 - Tools are registered in `RESEARCH_TOOLS` list in `research_agent.py`
 - Add new tools to `TOOL_MAP` in `research_agent.py`
@@ -50,16 +50,16 @@ AgentState (TypedDict with operator.add reducers)
 - Unit tests: mock all external APIs — tests MUST run offline (no API keys in CI)
 - Test naming: `test_<behaviour>_when_<condition>`
 - Coverage threshold: 80% minimum (enforced by pytest-cov)
-- `pytest -x` before every commit
+- `make gate` before every commit
 - Integration tests go in `tests/integration/` — may need env vars
 
 ## Adding a new data source
 Use the skill: `.github/skills/add-data-source.yml`
 
 ## PR checklist
-- [ ] `ruff check . && ruff format --check .` passes
-- [ ] `mypy src/` passes
-- [ ] `pytest -x --cov=src` passes with ≥80% coverage
-- [ ] New tool has mock data for offline testing
+- [ ] `make gate` passes
+- [ ] Agent behavior changes include deterministic eval coverage
+- [ ] New tool fails closed when mock data is disabled
 - [ ] `.env.example` updated if new env var added
 - [ ] `README.md` updated if new capability added
+- [ ] `CHANGELOG.md` and operational/failure-mode docs updated

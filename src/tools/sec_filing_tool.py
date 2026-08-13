@@ -6,12 +6,13 @@ Extracts management discussion & analysis sections for analyst consumption.
 """
 
 import logging
-import re
 from typing import Any
 
 import httpx
 from langchain_core.tools import tool
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+from src.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,11 @@ _MOCK_FILINGS = {
         "period": "FY2024",
         "mda_excerpt": (
             "Data Center revenue grew 217% year-over-year to $47.5 billion, driven by accelerating "
-            "demand for Hopper GPU computing. Gaming revenue recovered 15% as channel inventory normalised. "
-            "Management guides for continued strong Data Center growth in FY2025, underpinned by AI training "
-            "and inference workloads at hyperscale customers. Key risk: US export restrictions on A100/H100 "
-            "to China may reduce addressable market by up to $5 billion annually."
+            "demand for Hopper GPU computing. Gaming revenue recovered 15% as channel inventory "
+            "normalised. Management guides for continued strong Data Center growth in FY2025, "
+            "underpinned by AI training and inference workloads at hyperscale customers. Key risk: "
+            "US export restrictions on A100/H100 to China may reduce addressable market by up to "
+            "$5 billion annually."
         ),
     }
 }
@@ -78,10 +80,6 @@ def get_sec_filing_summary(ticker: str) -> dict[str, Any]:
     ticker = ticker.upper().strip()
     logger.info("sec_filing_tool: fetching filings for ticker=%s", ticker)
 
-    if ticker in _MOCK_FILINGS:
-        logger.info("sec_filing_tool: returning cached filing for %s", ticker)
-        return _MOCK_FILINGS[ticker]
-
     try:
         cik = _edgar_cik_lookup(ticker)
         if not cik:
@@ -91,13 +89,20 @@ def get_sec_filing_summary(ticker: str) -> dict[str, Any]:
         if not meta:
             return {"error": f"No 10-K/10-Q found for {ticker}"}
 
+        filing_url = (
+            "https://www.sec.gov/cgi-bin/browse-edgar"
+            f"?action=getcompany&CIK={cik}&type={meta['form_type']}"
+        )
         return {
             "form_type": meta["form_type"],
             "filed_at": meta["filed_at"],
             "period": "See EDGAR for full filing",
-            "mda_excerpt": "MDA full text available at https://www.sec.gov/cgi-bin/browse-edgar"
-                           f"?action=getcompany&CIK={cik}&type={meta['form_type']}",
+            "mda_excerpt": f"MDA full text available at {filing_url}",
+            "filing_url": filing_url,
         }
     except Exception as exc:
         logger.error("sec_filing_tool error ticker=%s error=%s", ticker, exc, exc_info=True)
-        return {"error": str(exc)}
+        if get_settings().allow_mock_data and ticker in _MOCK_FILINGS:
+            logger.warning("SEC request failed — returning illustrative filing for %s", ticker)
+            return _MOCK_FILINGS[ticker]
+        return {"error": "SEC filing provider request failed"}

@@ -1,34 +1,27 @@
-# ── Build stage ────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+# Digest-pinned base image; Dependabot keeps the digest current.
+FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS builder
 
 WORKDIR /build
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl \
-    && rm -rf /var/lib/apt/lists/*
+COPY requirements.lock .
+RUN pip install --prefix=/install --no-cache-dir --require-hashes -r requirements.lock
 
-# Copy and install dependencies (layer-cached unless requirements change)
-COPY requirements.txt .
-RUN pip install --upgrade pip \
-    && pip install --prefix=/install --no-cache-dir -r requirements.txt
-
-
-# ── Runtime stage ──────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS runtime
 
 LABEL org.opencontainers.image.title="financial-research-agent"
 LABEL org.opencontainers.image.description="LangGraph autonomous equity research agent"
 LABEL org.opencontainers.image.version="1.0.0"
 
-# Non-root user — security best practice
-RUN groupadd --gid 1001 agentuser \
-    && useradd --uid 1001 --gid 1001 --no-create-home --shell /bin/false agentuser
+RUN groupadd --gid 10001 agentuser \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin agentuser
 
 WORKDIR /app
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
+RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
+           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+           /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12
 
 # Copy application source
 COPY --chown=agentuser:agentuser src/ ./src/
@@ -38,14 +31,12 @@ COPY --chown=agentuser:agentuser logging.json.conf ./
 # Switch to non-root
 USER agentuser
 
-# Expose application port
 EXPOSE 8080
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8080/api/v1/health').raise_for_status()"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/health')"
 
-# Entrypoint: production-grade uvicorn with structured access logging
 CMD ["uvicorn", "main:app", \
      "--host", "0.0.0.0", \
      "--port", "8080", \

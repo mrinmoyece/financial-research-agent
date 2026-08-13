@@ -6,8 +6,8 @@ sentiment scoring.  Falls back to mock items in dev/CI mode.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
 
 import httpx
 from langchain_core.tools import tool
@@ -25,7 +25,9 @@ _MOCK_NEWS: list[NewsItem] = [
         published_at="2024-11-21T20:35:00Z",
         sentiment="positive",
         relevance_score=0.97,
-        summary="NVIDIA posted record quarterly revenue driven by Hopper GPU demand from hyperscalers.",
+        summary=(
+            "NVIDIA posted record quarterly revenue driven by Hopper GPU demand from hyperscalers."
+        ),
     ),
     NewsItem(
         headline="US export controls tightened on AI chips shipped to China",
@@ -33,7 +35,10 @@ _MOCK_NEWS: list[NewsItem] = [
         published_at="2024-11-18T14:12:00Z",
         sentiment="negative",
         relevance_score=0.89,
-        summary="Commerce Department expanded restrictions, potentially impacting NVIDIA's China business.",
+        summary=(
+            "Commerce Department expanded restrictions, potentially impacting "
+            "NVIDIA's China business."
+        ),
     ),
     NewsItem(
         headline="Blackwell GPU production ramp on track for Q1 2025",
@@ -41,16 +46,18 @@ _MOCK_NEWS: list[NewsItem] = [
         published_at="2024-11-15T09:00:00Z",
         sentiment="positive",
         relevance_score=0.92,
-        summary="Supply chain checks confirm Blackwell shipments beginning Q1, easing demand concerns.",
+        summary=(
+            "Supply chain checks confirm Blackwell shipments beginning Q1, easing demand concerns."
+        ),
     ),
 ]
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
-def _fetch_newsapi(ticker: str, api_key: str) -> list[dict]:
-    since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+def _fetch_newsapi(ticker: str, api_key: str) -> list[dict[str, Any]]:
+    since = (datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%d")
     url = "https://newsapi.org/v2/everything"
-    params = {
+    params: dict[str, str | int] = {
         "q": ticker,
         "from": since,
         "sortBy": "relevancy",
@@ -61,7 +68,8 @@ def _fetch_newsapi(ticker: str, api_key: str) -> list[dict]:
     with httpx.Client(timeout=15) as client:
         resp = client.get(url, params=params)
         resp.raise_for_status()
-        return resp.json().get("articles", [])
+        articles = resp.json().get("articles", [])
+        return [dict(article) for article in articles]
 
 
 def _classify_sentiment(headline: str) -> Literal["positive", "neutral", "negative"]:
@@ -126,8 +134,10 @@ def get_financial_news(ticker: str, max_articles: int = 8) -> list[NewsItem]:
     api_key = settings.newsapi_api_key.get_secret_value()
 
     if not api_key:
-        logger.warning("NewsAPI key absent — returning mock news for %s", ticker)
-        return _MOCK_NEWS[:max_articles]
+        if settings.allow_mock_data and ticker == "NVDA":
+            logger.warning("NewsAPI key absent — returning illustrative news for %s", ticker)
+            return _MOCK_NEWS[:max_articles]
+        return []
 
     try:
         articles = _fetch_newsapi(ticker, api_key)
@@ -136,17 +146,22 @@ def get_financial_news(ticker: str, max_articles: int = 8) -> list[NewsItem]:
         for position, a in enumerate(selected):
             headline = a.get("title", "")
             summary = a.get("description") or a.get("content") or ""
-            results.append(NewsItem(
-                headline=headline,
-                source=a.get("source", {}).get("name", "Unknown"),
-                published_at=a.get("publishedAt", ""),
-                sentiment=_classify_sentiment(headline),
-                relevance_score=_estimate_relevance(
-                    ticker, position, len(selected), headline, summary
-                ),
-                summary=summary,
-            ))
+            results.append(
+                NewsItem(
+                    headline=headline,
+                    source=a.get("source", {}).get("name", "Unknown"),
+                    published_at=a.get("publishedAt", ""),
+                    sentiment=_classify_sentiment(headline),
+                    relevance_score=_estimate_relevance(
+                        ticker, position, len(selected), headline, summary
+                    ),
+                    summary=summary,
+                    url=a.get("url", ""),
+                )
+            )
         return results
     except Exception as exc:
         logger.error("news_tool error ticker=%s error=%s", ticker, exc, exc_info=True)
-        return _MOCK_NEWS[:max_articles]
+        if settings.allow_mock_data and ticker == "NVDA":
+            return _MOCK_NEWS[:max_articles]
+        return []
