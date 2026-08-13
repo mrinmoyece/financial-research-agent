@@ -105,4 +105,4 @@ def get_sec_filing_summary(ticker: str) -> dict[str, Any]:
         if get_settings().allow_mock_data and ticker in _MOCK_FILINGS:
             logger.warning("SEC request failed — returning illustrative filing for %s", ticker)
             return _MOCK_FILINGS[ticker]
-        return {"error": str(exc)}
+        return {"error": "SEC filing provider request failed"}

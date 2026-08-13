@@ -15,11 +15,18 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from pydantic import ValidationError
+
 from src.config.llm import build_llm_candidates
 from src.config.settings import get_settings
 from src.models.state import AgentState, ResearchReport, ResearchReportPayload
 
 logger = logging.getLogger(__name__)
+
+
+class ModelBudgetExceededError(RuntimeError):
+    """Raised when report synthesis would exceed the configured model budget."""
+
 
 _ANALYST_SYSTEM_PROMPT = """\
 You are a senior equity research analyst at a top-tier investment bank.
@@ -154,7 +161,7 @@ def analyst_node(state: AgentState) -> dict[str, Any]:
                 logger.error("analyst_node: LLM provider index=%d failed", index)
         if response is None:
             if model_calls >= settings.max_model_calls_per_job:
-                raise RuntimeError("Per-job model-call budget exhausted") from last_error
+                raise ModelBudgetExceededError from last_error
             raise RuntimeError("All configured LLM providers failed") from last_error
         if response.usage_metadata is not None:
             input_tokens += response.usage_metadata.get("input_tokens", 0)
@@ -199,16 +206,43 @@ def analyst_node(state: AgentState) -> dict[str, Any]:
         logger.error("analyst_node: failed to parse LLM JSON output: %s", exc)
         return {
             "report": None,
-            "error": f"JSON parse error: {exc}",
+            "error": "Model returned invalid report JSON.",
             "model_calls": model_calls,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         }
-    except Exception as exc:
-        logger.error("analyst_node: unexpected error: %s", exc, exc_info=True)
+    except ModelBudgetExceededError:
+        logger.error("analyst_node: per-job model-call budget exhausted")
+        return {
+            "report": None,
+            "error": "Per-job model-call budget exhausted",
+            "model_calls": model_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+    except ValidationError:
+        logger.error("analyst_node: report schema validation failed")
+        return {
+            "report": None,
+            "error": "Model report failed schema validation.",
+            "model_calls": model_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+    except ValueError as exc:
+        logger.error("analyst_node: report rejected: %s", exc)
         return {
             "report": None,
             "error": str(exc),
+            "model_calls": model_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+    except Exception:
+        logger.exception("analyst_node: unexpected report generation error")
+        return {
+            "report": None,
+            "error": "Report generation failed.",
             "model_calls": model_calls,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,

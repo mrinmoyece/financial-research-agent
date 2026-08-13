@@ -200,7 +200,7 @@ def test_analyst_node_rejects_invalid_responses():
     with patch("src.agents.analyst_agent.build_llm_candidates", return_value=[llm]):
         result = analyst_node(_state())
     assert result["report"] is None
-    assert "JSON parse error" in result["error"]
+    assert result["error"] == "Model returned invalid report JSON."
 
     llm.invoke.return_value = AIMessage(content=[{"type": "text", "text": "not plain"}])
     with patch("src.agents.analyst_agent.build_llm_candidates", return_value=[llm]):

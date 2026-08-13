@@ -10,14 +10,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import src.graph.workflow as workflow
-from src.graph.workflow import (
-    build_graph,
-    route_after_research,
-    route_after_validation,
-    run_research,
-    validate_input,
-)
 from src.models.state import AgentState
+
+build_graph = workflow.build_graph
+route_after_research = workflow.route_after_research
+route_after_validation = workflow.route_after_validation
+run_research = workflow.run_research
+validate_input = workflow.validate_input
 
 
 class TestValidateInput:

@@ -35,7 +35,7 @@ class PrincipalRegistry:
     """Parse credentials once and retain only keyed hashes in memory."""
 
     def __init__(self, settings: Settings) -> None:
-        self._entries: list[tuple[bytes, Principal]] = []
+        self._entries: list[tuple[bytes, bytes, Principal]] = []
         raw = settings.api_principals_json.get_secret_value()
         if raw:
             try:
@@ -43,9 +43,11 @@ class PrincipalRegistry:
             except (json.JSONDecodeError, ValidationError, TypeError) as exc:
                 raise ValueError("API_PRINCIPALS_JSON is invalid") from exc
             for config in configs:
+                salt = secrets.token_bytes(16)
                 self._entries.append(
                     (
-                        self._digest(config.api_key),
+                        salt,
+                        self._digest(config.api_key, salt),
                         Principal(
                             principal_id=config.principal_id,
                             tenant_id=config.tenant_id,
@@ -54,9 +56,11 @@ class PrincipalRegistry:
                     )
                 )
         elif settings.api_key.get_secret_value():
+            salt = secrets.token_bytes(16)
             self._entries.append(
                 (
-                    self._digest(settings.api_key.get_secret_value()),
+                    salt,
+                    self._digest(settings.api_key.get_secret_value(), salt),
                     Principal(
                         principal_id="legacy-service",
                         tenant_id="default",
@@ -70,15 +74,15 @@ class PrincipalRegistry:
             )
 
     @staticmethod
-    def _digest(api_key: str) -> bytes:
-        return hashlib.sha256(api_key.encode("utf-8")).digest()
+    def _digest(api_key: str, salt: bytes) -> bytes:
+        return hashlib.pbkdf2_hmac("sha256", api_key.encode(), salt, 210000)
 
     def authenticate(self, api_key: str | None) -> Principal | None:
         if not api_key:
             return None
-        candidate = self._digest(api_key)
         matched: Principal | None = None
-        for digest, principal in self._entries:
+        for salt, digest, principal in self._entries:
+            candidate = self._digest(api_key, salt)
             if secrets.compare_digest(candidate, digest):
                 matched = principal
         return matched

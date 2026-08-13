@@ -68,11 +68,11 @@ class Worker:
             await self._processor(envelope)
         except Exception as exc:
             heartbeat_stop.set()
-            await heartbeat
+            await asyncio.gather(heartbeat)
             await asyncio.to_thread(self._queue.retry, envelope, str(exc))
             raise
         heartbeat_stop.set()
-        await heartbeat
+        await asyncio.gather(heartbeat)
         acknowledged = await asyncio.to_thread(self._queue.ack, envelope)
         if not acknowledged:
             raise RuntimeError(f"Lease for job {envelope.job_id} was lost before ack")

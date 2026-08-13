@@ -18,6 +18,7 @@ def test_builds_each_supported_provider():
         )
         assert result is azure.return_value
         azure.assert_called_once()
+        assert azure.call_args.kwargs["api_key"] == "secret"
 
     with patch("src.config.llm.ChatOpenAI") as openai:
         result = build_llm(
@@ -28,6 +29,7 @@ def test_builds_each_supported_provider():
         )
         assert result is openai.return_value
         assert openai.call_args.kwargs["base_url"].startswith("https://")
+        assert openai.call_args.kwargs["api_key"] == "secret"
 
     with patch("src.config.llm.ChatOpenAI") as openai:
         result = build_llm(
@@ -38,6 +40,7 @@ def test_builds_each_supported_provider():
         )
         assert result is openai.return_value
         assert "base_url" not in openai.call_args.kwargs
+        assert openai.call_args.kwargs["api_key"] == "secret"
 
 
 def test_configure_langsmith_sets_environment(monkeypatch):

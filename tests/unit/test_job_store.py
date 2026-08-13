@@ -99,6 +99,18 @@ def test_set_if_absent_is_atomic_for_memory_and_redis(monkeypatch):
     assert persistent.get("job") == {"status": "pending"}
 
 
+def test_memory_store_does_not_expose_mutable_internal_records():
+    store = JobStore(namespace="copy-safe")
+    original = {"status": "pending"}
+    store.set("job", original)
+    original["status"] = "corrupted"
+    assert store.get("job") == {"status": "pending"}
+
+    retrieved = store.get("job")
+    retrieved["status"] = "corrupted"
+    assert store.get("job") == {"status": "pending"}
+
+
 def test_required_redis_fails_startup(monkeypatch):
     def fail(*_args, **_kwargs):
         raise OSError("down")

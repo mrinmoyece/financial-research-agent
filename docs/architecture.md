@@ -21,7 +21,7 @@ flowchart LR
 ## Trust boundaries
 
 - The gateway owns end-user identity, TLS, network policy, and edge abuse prevention.
-- The API authenticates hashed service-principal credentials and enforces tenant boundaries and `reader`, `researcher`, `approver`, and `admin` roles.
+- The API authenticates independently salted, PBKDF2-derived service-principal credentials and enforces tenant boundaries and `reader`, `researcher`, `approver`, and `admin` roles.
 - Redis-backed rate and concurrency controls operate across API replicas. They complement, rather than replace, gateway controls.
 - LLM output and provider payloads are untrusted. Tool selection is allowlisted, external content is bounded and screened for prompt injection, and report citations must reference the source registry.
 - Redis contains job inputs, status, provider-derived content, and generated reports. Use TLS, authentication, encryption at rest, network isolation, and bounded retention.

@@ -115,9 +115,11 @@ class JobStore:
                 raw = self._redis.get(self._key(job_id))
                 return json.loads(raw) if raw is not None else None
             except Exception as exc:
-                logger.error("JobStore.get: Redis error job_id=%s error=%s", job_id, exc)
+                logger.error("JobStore.get: Redis operation failed")
                 raise JobStoreError(f"Unable to read job {job_id}") from exc
-        return self._memory.get(job_id)
+        with self._lock:
+            value = self._memory.get(job_id)
+            return dict(value) if value is not None else None
 
     def set(self, job_id: str, value: dict[str, Any]) -> None:
         if self._redis is not None:
@@ -129,10 +131,10 @@ class JobStore:
                 )
                 return
             except Exception as exc:
-                logger.error("JobStore.set: Redis error job_id=%s error=%s", job_id, exc)
+                logger.error("JobStore.set: Redis operation failed")
                 raise JobStoreError(f"Unable to write job {job_id}") from exc
         with self._lock:
-            self._memory[job_id] = value
+            self._memory[job_id] = dict(value)
 
     def set_if_absent(self, job_id: str, value: dict[str, Any]) -> bool:
         """Create a status record atomically; return false when it already exists."""
@@ -147,12 +149,12 @@ class JobStore:
                     )
                 )
             except Exception as exc:
-                logger.error("JobStore.set_if_absent: Redis error job_id=%s error=%s", job_id, exc)
+                logger.error("JobStore.set_if_absent: Redis operation failed")
                 raise JobStoreError(f"Unable to create job {job_id}") from exc
         with self._lock:
             if job_id in self._memory:
                 return False
-            self._memory[job_id] = value
+            self._memory[job_id] = dict(value)
             return True
 
     def delete(self, job_id: str) -> None:
@@ -160,9 +162,10 @@ class JobStore:
             try:
                 self._redis.delete(self._key(job_id))
             except Exception as exc:
-                logger.error("JobStore.delete: Redis error job_id=%s error=%s", job_id, exc)
+                logger.error("JobStore.delete: Redis operation failed")
                 raise JobStoreError(f"Unable to delete job {job_id}") from exc
-        self._memory.pop(job_id, None)
+        with self._lock:
+            self._memory.pop(job_id, None)
 
     def values(self) -> list[dict[str, Any]]:
         """Return all known jobs. Used by the list-jobs endpoint."""
@@ -176,7 +179,8 @@ class JobStore:
             except Exception as exc:
                 logger.error("JobStore.values: Redis error=%s", exc)
                 raise JobStoreError("Unable to list jobs") from exc
-        return list(self._memory.values())
+        with self._lock:
+            return [dict(value) for value in self._memory.values()]
 
     def clear(self) -> None:
         """Remove all jobs. Primarily for test fixtures."""
@@ -188,7 +192,8 @@ class JobStore:
             except Exception as exc:
                 logger.error("JobStore.clear: Redis error=%s", exc)
                 raise JobStoreError("Unable to clear jobs") from exc
-        self._memory.clear()
+        with self._lock:
+            self._memory.clear()
 
     def __len__(self) -> int:
         if self._redis is not None:
@@ -197,4 +202,5 @@ class JobStore:
             except Exception as exc:
                 logger.error("JobStore.__len__: Redis error=%s", exc)
                 raise JobStoreError("Unable to count jobs") from exc
-        return len(self._memory)
+        with self._lock:
+            return len(self._memory)

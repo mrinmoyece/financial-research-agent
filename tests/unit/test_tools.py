@@ -199,3 +199,17 @@ class TestSecFilingTool:
         with patch("src.tools.sec_filing_tool._edgar_cik_lookup", return_value=None):
             result = get_sec_filing_summary.invoke({"ticker": "UNKNOWN"})
         assert result == {"error": "CIK not found for ticker UNKNOWN"}
+
+    def test_provider_failure_returns_stable_safe_error(self):
+        with (
+            patch(
+                "src.tools.sec_filing_tool._edgar_cik_lookup",
+                side_effect=RuntimeError("sensitive upstream detail"),
+            ),
+            patch(
+                "src.tools.sec_filing_tool.get_settings",
+                return_value=Settings(allow_mock_data=False),
+            ),
+        ):
+            result = get_sec_filing_summary.invoke({"ticker": "EXM"})
+        assert result == {"error": "SEC filing provider request failed"}

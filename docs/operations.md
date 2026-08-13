@@ -21,7 +21,7 @@ This guide defines the supported production controls and the limits of the refer
 | `LLM_PROVIDER` | Approved provider | Select the controlled model endpoint |
 | Provider credentials | Secret references | Keep credentials outside images and manifests |
 
-`API_PRINCIPALS_JSON` is an array of `{principal_id, tenant_id, roles, api_key}` objects. Credentials are reduced to SHA-256 digests at startup and compared in constant time. `API_KEY` remains a legacy single-tenant compatibility path with all roles. Terminate TLS and enforce end-user authorization, stricter edge limits, and abuse controls at the gateway.
+`API_PRINCIPALS_JSON` is an array of `{principal_id, tenant_id, roles, api_key}` objects. Credentials are converted to independently salted PBKDF2-HMAC-SHA256 digests at startup and compared in constant time. `API_KEY` remains a legacy single-tenant compatibility path with all roles. Terminate TLS and enforce end-user authorization, stricter edge limits, and abuse controls at the gateway.
 
 ## Data integrity
 

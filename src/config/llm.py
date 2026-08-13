@@ -30,7 +30,7 @@ def _build_provider_llm(cfg: Settings, provider: Provider) -> BaseChatModel:
         )
         return AzureChatOpenAI(
             azure_endpoint=cfg.azure_openai_endpoint,
-            api_key=cfg.azure_openai_api_key,
+            api_key=cfg.azure_openai_api_key.get_secret_value(),
             api_version=cfg.azure_openai_api_version,
             azure_deployment=cfg.azure_chat_deployment,
             temperature=cfg.llm_temperature,
@@ -45,7 +45,7 @@ def _build_provider_llm(cfg: Settings, provider: Provider) -> BaseChatModel:
         )
         return ChatOpenAI(
             base_url=cfg.github_models_endpoint,
-            api_key=cfg.github_token,
+            api_key=cfg.github_token.get_secret_value(),
             model=cfg.github_chat_model,
             temperature=cfg.llm_temperature,
             max_completion_tokens=cfg.llm_max_tokens,
@@ -53,7 +53,7 @@ def _build_provider_llm(cfg: Settings, provider: Provider) -> BaseChatModel:
         )
     logger.info("LLM: OpenAI direct model=%s", cfg.openai_chat_model)
     return ChatOpenAI(
-        api_key=cfg.openai_api_key,
+        api_key=cfg.openai_api_key.get_secret_value(),
         model=cfg.openai_chat_model,
         temperature=cfg.llm_temperature,
         max_completion_tokens=cfg.llm_max_tokens,

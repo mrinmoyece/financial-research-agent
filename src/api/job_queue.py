@@ -26,7 +26,7 @@ JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]  
 
 _ENQUEUE_SCRIPT = """
 -- enqueue
-if redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[3]) == false then return 0 end
+if not redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[3]) then return 0 end
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
 redis.call('LPUSH', KEYS[3], ARGV[1])
 return 1
@@ -70,7 +70,7 @@ return 1
 """
 _RENEW_SCRIPT = """
 -- renew
-if redis.call('ZSCORE', KEYS[1], ARGV[1]) == false then return 0 end
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then return 0 end
 redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
 return 1
 """
@@ -85,24 +85,55 @@ return 1
 class RedisClient(Protocol):
     """Subset of redis-py used by :class:`JobQueue`."""
 
-    def ping(self) -> object: ...
-    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> object: ...
-    def hsetnx(self, name: str, key: str, value: str) -> int: ...
-    def hset(self, name: str, key: str, value: str) -> int: ...
-    def hget(self, name: str, key: str) -> str | bytes | None: ...
-    def hdel(self, name: str, *keys: str) -> int: ...
-    def lpush(self, name: str, *values: str) -> int: ...
-    def brpoplpush(self, source: str, destination: str, timeout: float) -> str | bytes | None: ...
-    def lrem(self, name: str, count: int, value: str) -> int: ...
-    def lrange(self, name: str, start: int, end: int) -> list[str | bytes]: ...
-    def llen(self, name: str) -> int: ...
-    def zadd(self, name: str, mapping: dict[str, float]) -> int: ...
-    def zrem(self, name: str, *values: str) -> int: ...
+    def ping(self) -> object:
+        raise NotImplementedError
+
+    def eval(self, script: str, numkeys: int, *keys_and_args: str) -> object:
+        raise NotImplementedError
+
+    def hsetnx(self, name: str, key: str, value: str) -> int:
+        raise NotImplementedError
+
+    def hset(self, name: str, key: str, value: str) -> int:
+        raise NotImplementedError
+
+    def hget(self, name: str, key: str) -> str | bytes | None:
+        raise NotImplementedError
+
+    def hdel(self, name: str, *keys: str) -> int:
+        raise NotImplementedError
+
+    def lpush(self, name: str, *values: str) -> int:
+        raise NotImplementedError
+
+    def brpoplpush(self, source: str, destination: str, timeout: float) -> str | bytes | None:
+        raise NotImplementedError
+
+    def lrem(self, name: str, count: int, value: str) -> int:
+        raise NotImplementedError
+
+    def lrange(self, name: str, start: int, end: int) -> list[str | bytes]:
+        raise NotImplementedError
+
+    def llen(self, name: str) -> int:
+        raise NotImplementedError
+
+    def zadd(self, name: str, mapping: dict[str, float]) -> int:
+        raise NotImplementedError
+
+    def zrem(self, name: str, *values: str) -> int:
+        raise NotImplementedError
+
     def zrangebyscore(
         self, name: str, minimum: float | str, maximum: float | str
-    ) -> list[str | bytes]: ...
-    def zscore(self, name: str, value: str) -> float | None: ...
-    def zcard(self, name: str) -> int: ...
+    ) -> list[str | bytes]:
+        raise NotImplementedError
+
+    def zscore(self, name: str, value: str) -> float | None:
+        raise NotImplementedError
+
+    def zcard(self, name: str) -> int:
+        raise NotImplementedError
 
 
 class JobQueueError(RuntimeError):
