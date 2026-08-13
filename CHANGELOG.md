@@ -10,6 +10,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 - Added constant-time service API-key authentication, bounded request bodies, explicit CORS controls, security headers, private vulnerability reporting guidance, and fail-fast production configuration.
 - Pinned workflow actions and container bases to immutable SHAs/digests; added history secret scanning, dependency review, CodeQL security-and-quality queries, image scanning, provenance, and SBOM generation.
 - Upgraded vulnerable framework and agent dependencies to a clean runtime audit.
+- Removed an unused alternate HTTP client from the development dependency surface.
+- Upgraded pytest to the patched 9.0.3 release after a development-tool advisory.
 
 ### Changed
 

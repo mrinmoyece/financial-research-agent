@@ -276,12 +276,7 @@ def create_app() -> FastAPI:
         except Exception:
             _governance.release_job_slot(principal.tenant_id)
             raise
-        logger.info(
-            "research job submitted job_id=%s ticker_count=%d depth=%s",
-            job_id,
-            len(request.tickers),
-            request.research_depth,
-        )
+        logger.info("research job submitted")
         return job
 
     @app.get(
