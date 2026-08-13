@@ -2,7 +2,7 @@
 
 # ── Dev extras ────────────────────────────────────────────────────────────────
 ruff==0.6.9                # linter + formatter
-mypy==1.11.2               # static type checker
+mypy==2.3.0               # static type checker
 pre-commit==3.8.0          # git hooks
 bandit==1.9.4
 pytest==9.0.3
