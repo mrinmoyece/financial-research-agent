@@ -65,8 +65,12 @@ def validate_input(state: AgentState) -> dict[str, Any]:
             "ticker_analyses": [],
             "news_items": [],
             "macro_indicators": [],
+            "sources": [],
             "tool_calls_log": [],
             "messages": [],
+            "model_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
             "report": None,
         }
 
@@ -79,8 +83,12 @@ def validate_input(state: AgentState) -> dict[str, Any]:
         "ticker_analyses": [],
         "news_items": [],
         "macro_indicators": [],
+        "sources": [],
         "tool_calls_log": [],
         "messages": [],
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
     }
 
 
@@ -192,8 +200,12 @@ async def run_research(
         "ticker_analyses": [],
         "news_items": [],
         "macro_indicators": [],
+        "sources": [],
         "tool_calls_log": [],
         "messages": [],
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
         "report": None,
         "error": None,
     }

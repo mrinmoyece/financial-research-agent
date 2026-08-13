@@ -7,6 +7,7 @@ endpoint), so switching providers requires no code change in agents.
 
 import logging
 import os
+from typing import Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
@@ -16,18 +17,12 @@ from src.config.settings import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 
-def build_llm(settings: Settings | None = None) -> BaseChatModel:
-    """
-    Returns a LangChain ChatModel instance.
+Provider = Literal["azure_openai", "github_models", "openai"]
 
-    Resolution order:
-      1. azure_openai  → AzureChatOpenAI (production default)
-      2. github_models → AzureChatOpenAI pointed at GitHub Models endpoint
-      3. openai        → ChatOpenAI direct (fallback)
-    """
-    cfg = settings or get_settings()
 
-    if cfg.llm_provider == "azure_openai":
+def _build_provider_llm(cfg: Settings, provider: Provider) -> BaseChatModel:
+    """Build one explicitly selected provider client."""
+    if provider == "azure_openai":
         logger.info(
             "LLM: Azure OpenAI endpoint=%s deployment=%s",
             cfg.azure_openai_endpoint,
@@ -40,11 +35,9 @@ def build_llm(settings: Settings | None = None) -> BaseChatModel:
             azure_deployment=cfg.azure_chat_deployment,
             temperature=cfg.llm_temperature,
             max_completion_tokens=cfg.llm_max_tokens,
-            # Retry config — LangChain respects these natively
             max_retries=cfg.max_tool_retries,
         )
-
-    if cfg.llm_provider == "github_models":
+    if provider == "github_models":
         logger.info(
             "LLM: GitHub Models endpoint=%s model=%s",
             cfg.github_models_endpoint,
@@ -58,8 +51,6 @@ def build_llm(settings: Settings | None = None) -> BaseChatModel:
             max_completion_tokens=cfg.llm_max_tokens,
             max_retries=cfg.max_tool_retries,
         )
-
-    # openai direct
     logger.info("LLM: OpenAI direct model=%s", cfg.openai_chat_model)
     return ChatOpenAI(
         api_key=cfg.openai_api_key,
@@ -68,6 +59,27 @@ def build_llm(settings: Settings | None = None) -> BaseChatModel:
         max_completion_tokens=cfg.llm_max_tokens,
         max_retries=cfg.max_tool_retries,
     )
+
+
+def build_llm(settings: Settings | None = None) -> BaseChatModel:
+    """
+    Returns a LangChain ChatModel instance.
+
+    Resolution order:
+      1. azure_openai  → AzureChatOpenAI (production default)
+      2. github_models → AzureChatOpenAI pointed at GitHub Models endpoint
+      3. openai        → ChatOpenAI direct (fallback)
+    """
+    cfg = settings or get_settings()
+
+    return _build_provider_llm(cfg, cfg.llm_provider)
+
+
+def build_llm_candidates(settings: Settings | None = None) -> list[BaseChatModel]:
+    """Build the primary model followed by configured fallback providers."""
+    cfg = settings or get_settings()
+    providers: list[Provider] = [cfg.llm_provider, *cfg.fallback_providers]
+    return [_build_provider_llm(cfg, provider) for provider in providers]
 
 
 def configure_langsmith(settings: Settings | None = None) -> None:

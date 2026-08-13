@@ -16,13 +16,17 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import UTC, datetime
-from typing import Any, cast
+from functools import partial
+from hashlib import sha256
+from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage
 
-from src.config.llm import build_llm
+from src.config.llm import build_llm_candidates
 from src.config.settings import get_settings
-from src.models.state import AgentState, MacroIndicator, NewsItem, TickerAnalysis
+from src.models.state import AgentState, MacroIndicator, NewsItem, SourceRecord, TickerAnalysis
+from src.resilience import CircuitBreaker, CircuitOpenError
+from src.security.content import UnsafeContentError, sanitize_tool_result
 from src.tools.macro_tool import get_macro_indicators
 from src.tools.market_data_tool import get_market_data
 from src.tools.news_tool import get_financial_news
@@ -71,6 +75,62 @@ RESEARCH_TOOLS = [
 ]
 
 TOOL_MAP = {t.name: t for t in RESEARCH_TOOLS}
+_CIRCUITS: dict[str, CircuitBreaker] = {}
+
+_SOURCE_LOCATORS = {
+    "get_market_data": "https://www.alphavantage.co/",
+    "get_financial_news": "https://newsapi.org/",
+    "get_macro_indicators": "https://www.alphavantage.co/",
+    "get_sec_filing_summary": "https://www.sec.gov/edgar/search/",
+}
+_SOURCE_TYPES: dict[str, Literal["market_data", "news", "macro", "sec_filing"]] = {
+    "get_market_data": "market_data",
+    "get_financial_news": "news",
+    "get_macro_indicators": "macro",
+    "get_sec_filing_summary": "sec_filing",
+}
+
+
+def _source_records(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    result: Any,
+) -> list[SourceRecord]:
+    records = result if isinstance(result, list) else [result]
+    sources: list[SourceRecord] = []
+    for record in records:
+        serialized = json.dumps(record, sort_keys=True, default=str)
+        digest = sha256(serialized.encode()).hexdigest()
+        locator = _SOURCE_LOCATORS[tool_name]
+        label = tool_name
+        if isinstance(record, dict):
+            locator = str(record.get("url") or record.get("filing_url") or locator)
+            label = str(
+                record.get("headline")
+                or record.get("name")
+                or record.get("company_name")
+                or record.get("form_type")
+                or tool_name
+            )[:200]
+        ticker = tool_args.get("ticker")
+        source_seed = json.dumps(
+            {"tool": tool_name, "args": tool_args, "content_sha256": digest},
+            sort_keys=True,
+        )
+        sources.append(
+            SourceRecord(
+                source_id=f"src_{sha256(source_seed.encode()).hexdigest()[:12]}",
+                provider=tool_name,
+                source_type=_SOURCE_TYPES[tool_name],
+                locator=locator,
+                retrieved_at=datetime.now(UTC).isoformat(),
+                ticker=str(ticker) if ticker else None,
+                label=label,
+                content_sha256=digest,
+            )
+        )
+    return sources
+
 
 _SYSTEM_PROMPT = """\
 You are a senior financial research analyst with 20+ years of experience covering global equities.
@@ -104,7 +164,7 @@ def research_node(state: AgentState) -> dict[str, Any]:
     )
 
     settings = get_settings()
-    llm = build_llm(settings).bind_tools(RESEARCH_TOOLS)
+    llms = [candidate.bind_tools(RESEARCH_TOOLS) for candidate in build_llm_candidates(settings)]
 
     # Build initial message for the LLM
     depth_instruction = {
@@ -127,13 +187,35 @@ def research_node(state: AgentState) -> dict[str, Any]:
     ticker_analyses: list[TickerAnalysis] = []
     news_items: list[NewsItem] = []
     macro_indicators: list[MacroIndicator] = []
+    sources: list[SourceRecord] = []
     tool_calls_log: list[dict[str, Any]] = []
     iterations = 0
     max_iterations = settings.react_max_iterations
+    model_calls = state.get("model_calls", 0)
+    input_tokens = state.get("input_tokens", 0)
+    output_tokens = state.get("output_tokens", 0)
 
-    while iterations < max_iterations:
+    while iterations < max_iterations and model_calls < settings.max_model_calls_per_job:
         iterations += 1
-        response: AIMessage = llm.invoke(messages)
+        last_error: Exception | None = None
+        response: AIMessage | None = None
+        for index, llm in enumerate(llms):
+            if model_calls >= settings.max_model_calls_per_job:
+                break
+            model_calls += 1
+            try:
+                response = llm.invoke(messages)
+                if index:
+                    logger.warning("research_node: LLM fallback provider index=%d used", index)
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.error("research_node: LLM provider index=%d failed", index)
+        if response is None:
+            raise RuntimeError("All configured LLM providers failed") from last_error
+        if response.usage_metadata is not None:
+            input_tokens += response.usage_metadata.get("input_tokens", 0)
+            output_tokens += response.usage_metadata.get("output_tokens", 0)
         messages.append(
             {
                 "role": "assistant",
@@ -148,6 +230,9 @@ def research_node(state: AgentState) -> dict[str, Any]:
 
         # Execute each tool call
         for tc in response.tool_calls:
+            if len(tool_calls_log) >= settings.max_tool_calls_per_job:
+                logger.warning("research_node: tool-call budget exhausted")
+                break
             tool_name = tc["name"]
             tool_args = tc["args"]
             tool_call_id = tc["id"]
@@ -159,7 +244,25 @@ def research_node(state: AgentState) -> dict[str, Any]:
                 result = {"error": f"Unknown tool: {tool_name}"}
             else:
                 try:
-                    result = _invoke_tool_with_timeout(tool_fn, tool_args)
+                    circuit = _CIRCUITS.setdefault(
+                        tool_name,
+                        CircuitBreaker(
+                            settings.circuit_breaker_failure_threshold,
+                            settings.circuit_breaker_recovery_seconds,
+                        ),
+                    )
+                    result = circuit.call(partial(_invoke_tool_with_timeout, tool_fn, tool_args))
+                    result = sanitize_tool_result(
+                        result,
+                        max_chars=settings.max_external_content_chars,
+                        policy=settings.prompt_injection_policy,
+                    )
+                except CircuitOpenError as exc:
+                    logger.error("research_node: tool=%s circuit open", tool_name)
+                    result = {"error": str(exc)}
+                except UnsafeContentError as exc:
+                    logger.error("research_node: tool=%s unsafe content", tool_name)
+                    result = {"error": str(exc)}
                 except TimeoutError as exc:
                     logger.error("research_node: tool=%s timed out error=%s", tool_name, exc)
                     result = {"error": str(exc)}
@@ -178,6 +281,13 @@ def research_node(state: AgentState) -> dict[str, Any]:
                 news_items.extend(result)
             elif tool_name == "get_macro_indicators" and isinstance(result, list):
                 macro_indicators.extend(result)
+
+            if (
+                tool_name in _SOURCE_LOCATORS
+                and not (isinstance(result, dict) and "error" in result)
+                and result
+            ):
+                sources.extend(_source_records(tool_name, tool_args, result))
 
             # Always log every tool call for audit/observability
             tool_calls_log.append(
@@ -213,11 +323,14 @@ def research_node(state: AgentState) -> dict[str, Any]:
     error = None
     if not ticker_analyses and not news_items:
         error = "No research data was available from the configured providers."
+    elif not sources:
+        error = "Research data lacked verifiable source provenance."
 
     return {
         "ticker_analyses": ticker_analyses,
         "news_items": news_items,
         "macro_indicators": macro_indicators,
+        "sources": sources,
         "tool_calls_log": tool_calls_log,
         "messages": [
             {
@@ -228,4 +341,7 @@ def research_node(state: AgentState) -> dict[str, Any]:
             }
         ],
         "error": error,
+        "model_calls": model_calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
     }

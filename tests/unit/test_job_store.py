@@ -11,6 +11,7 @@ from src.config.settings import Settings
 class _FakeRedis:
     def __init__(self):
         self.data = {}
+        self.last_expiry = None
 
     def ping(self):
         return True
@@ -18,9 +19,12 @@ class _FakeRedis:
     def get(self, key):
         return self.data.get(key)
 
-    def set(self, key, value, ex):
+    def set(self, key, value, ex, nx=False):
+        if nx and key in self.data:
+            return False
         self.data[key] = value
-        return ex
+        self.last_expiry = ex
+        return True
 
     def delete(self, *keys):
         for key in keys:
@@ -65,6 +69,34 @@ def test_redis_store_crud_and_namespace(monkeypatch):
     assert store.get("job-1") is None
     store.clear()
     assert store.values() == []
+
+
+def test_job_records_use_dedicated_long_retention(monkeypatch):
+    redis = _FakeRedis()
+    monkeypatch.setattr(
+        "src.api.job_store._redis_lib",
+        SimpleNamespace(from_url=lambda *_args, **_kwargs: redis),
+    )
+    store = JobStore(Settings(cache_ttl_seconds=60, job_retention_seconds=86400))
+    store.set("awaiting", {"status": "awaiting_approval"})
+    assert redis.last_expiry == 86400
+
+
+def test_set_if_absent_is_atomic_for_memory_and_redis(monkeypatch):
+    memory = JobStore(namespace="atomic-memory")
+    assert memory.set_if_absent("job", {"status": "pending"})
+    assert not memory.set_if_absent("job", {"status": "replacement"})
+    assert memory.get("job") == {"status": "pending"}
+
+    redis = _FakeRedis()
+    monkeypatch.setattr(
+        "src.api.job_store._redis_lib",
+        SimpleNamespace(from_url=lambda *_args, **_kwargs: redis),
+    )
+    persistent = JobStore(Settings(), namespace="atomic-redis")
+    assert persistent.set_if_absent("job", {"status": "pending"})
+    assert not persistent.set_if_absent("job", {"status": "replacement"})
+    assert persistent.get("job") == {"status": "pending"}
 
 
 def test_required_redis_fails_startup(monkeypatch):

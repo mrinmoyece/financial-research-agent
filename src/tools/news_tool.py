@@ -156,6 +156,7 @@ def get_financial_news(ticker: str, max_articles: int = 8) -> list[NewsItem]:
                         ticker, position, len(selected), headline, summary
                     ),
                     summary=summary,
+                    url=a.get("url", ""),
                 )
             )
         return results

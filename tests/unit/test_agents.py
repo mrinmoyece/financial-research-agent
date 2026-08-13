@@ -19,7 +19,11 @@ def _state(**overrides) -> AgentState:
         "ticker_analyses": [],
         "news_items": [],
         "macro_indicators": [],
+        "sources": [],
         "tool_calls_log": [],
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
         "messages": [],
         "report": None,
         "error": None,
@@ -91,7 +95,7 @@ def test_research_node_classifies_tool_results():
         }[tool.name]
 
     with (
-        patch("src.agents.research_agent.build_llm", return_value=llm),
+        patch("src.agents.research_agent.build_llm_candidates", return_value=[llm]),
         patch("src.agents.research_agent._invoke_tool_with_timeout", side_effect=invoke),
     ):
         result = research_node(_state())
@@ -110,7 +114,7 @@ def test_research_node_reports_no_data_and_handles_tool_failure():
     )
     llm = _SequencedLlm([response, AIMessage(content="done")])
     with (
-        patch("src.agents.research_agent.build_llm", return_value=llm),
+        patch("src.agents.research_agent.build_llm_candidates", return_value=[llm]),
         patch(
             "src.agents.research_agent._invoke_tool_with_timeout",
             side_effect=RuntimeError("provider down"),
@@ -154,6 +158,16 @@ def test_analyst_prompt_and_valid_report():
                 "impact_on_equities": "Supportive",
             }
         ],
+        sources=[
+            {
+                "source_id": "src_aaaaaaaaaaaa",
+                "provider": "get_market_data",
+                "source_type": "market_data",
+                "locator": "https://example.com",
+                "retrieved_at": "2026-01-01T00:00:00Z",
+                "ticker": "NVDA",
+            }
+        ],
     )
     prompt = _build_analyst_prompt(state)
     assert "Fundamental Data" in prompt
@@ -170,10 +184,11 @@ def test_analyst_prompt_and_valid_report():
         "price_target_12m": 120,
         "confidence_score": 0.8,
         "data_sources_used": ["market_data"],
+        "citations": [{"source_id": "src_aaaaaaaaaaaa", "claim": "Summary"}],
     }
     llm = MagicMock()
     llm.invoke.return_value = AIMessage(content=f"```json\n{json.dumps(payload)}\n```")
-    with patch("src.agents.analyst_agent.build_llm", return_value=llm):
+    with patch("src.agents.analyst_agent.build_llm_candidates", return_value=[llm]):
         result = analyst_node(state)
     assert result["report"]["recommended_action"] == "HOLD"
     assert result["error"] is None
@@ -182,12 +197,12 @@ def test_analyst_prompt_and_valid_report():
 def test_analyst_node_rejects_invalid_responses():
     llm = MagicMock()
     llm.invoke.return_value = AIMessage(content="not json")
-    with patch("src.agents.analyst_agent.build_llm", return_value=llm):
+    with patch("src.agents.analyst_agent.build_llm_candidates", return_value=[llm]):
         result = analyst_node(_state())
     assert result["report"] is None
     assert "JSON parse error" in result["error"]
 
     llm.invoke.return_value = AIMessage(content=[{"type": "text", "text": "not plain"}])
-    with patch("src.agents.analyst_agent.build_llm", return_value=llm):
+    with patch("src.agents.analyst_agent.build_llm_candidates", return_value=[llm]):
         result = analyst_node(_state())
     assert result["error"] == "Analyst response must be plain JSON text"

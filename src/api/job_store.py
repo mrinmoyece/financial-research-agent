@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from typing import Any
 
 from src.config.settings import Settings
@@ -52,8 +53,9 @@ class JobStore:
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", namespace):
             raise ValueError("namespace must be a lowercase Redis-safe identifier")
         self._namespace = namespace
-        self._ttl_seconds: int = settings.cache_ttl_seconds if settings else 3600
+        self._ttl_seconds: int = settings.job_retention_seconds if settings else 2592000
         self._memory: dict[str, dict[str, Any]] = {}
+        self._lock = threading.RLock()
         self._redis: Any | None = None
 
         if settings is not None and settings.redis_required and _redis_lib is None:
@@ -129,7 +131,29 @@ class JobStore:
             except Exception as exc:
                 logger.error("JobStore.set: Redis error job_id=%s error=%s", job_id, exc)
                 raise JobStoreError(f"Unable to write job {job_id}") from exc
-        self._memory[job_id] = value
+        with self._lock:
+            self._memory[job_id] = value
+
+    def set_if_absent(self, job_id: str, value: dict[str, Any]) -> bool:
+        """Create a status record atomically; return false when it already exists."""
+        if self._redis is not None:
+            try:
+                return bool(
+                    self._redis.set(
+                        self._key(job_id),
+                        json.dumps(value, default=str),
+                        ex=self._ttl_seconds,
+                        nx=True,
+                    )
+                )
+            except Exception as exc:
+                logger.error("JobStore.set_if_absent: Redis error job_id=%s error=%s", job_id, exc)
+                raise JobStoreError(f"Unable to create job {job_id}") from exc
+        with self._lock:
+            if job_id in self._memory:
+                return False
+            self._memory[job_id] = value
+            return True
 
     def delete(self, job_id: str) -> None:
         if self._redis is not None:

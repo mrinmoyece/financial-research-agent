@@ -14,4 +14,6 @@ Maintainers should acknowledge a complete report within five business days, asse
 
 ## Deployment responsibility
 
-The application provides a single constant-time-compared service API key. It does not provide end-user identity, RBAC, transport security, or gateway rate limiting. Operators must supply those controls and follow [docs/operations.md](docs/operations.md).
+The application provides hashed service-principal credentials, tenant isolation, route RBAC, distributed rate/concurrency limits, a hash-chained governance log, and mandatory report approval by default. It does not provide interactive end-user identity, TLS termination, a WAF, or network isolation. Operators must supply those controls and follow [docs/operations.md](docs/operations.md).
+
+Provider payloads and model output are untrusted. The runtime bounds and screens external content, allowlists tools, enforces autonomous-call budgets, validates citations against source provenance, and withholds consequential output for human approval. These controls reduce risk but do not guarantee factual accuracy or detect every adversarial instruction.

@@ -89,12 +89,16 @@ def get_sec_filing_summary(ticker: str) -> dict[str, Any]:
         if not meta:
             return {"error": f"No 10-K/10-Q found for {ticker}"}
 
+        filing_url = (
+            "https://www.sec.gov/cgi-bin/browse-edgar"
+            f"?action=getcompany&CIK={cik}&type={meta['form_type']}"
+        )
         return {
             "form_type": meta["form_type"],
             "filed_at": meta["filed_at"],
             "period": "See EDGAR for full filing",
-            "mda_excerpt": "MDA full text available at https://www.sec.gov/cgi-bin/browse-edgar"
-            f"?action=getcompany&CIK={cik}&type={meta['form_type']}",
+            "mda_excerpt": f"MDA full text available at {filing_url}",
+            "filing_url": filing_url,
         }
     except Exception as exc:
         logger.error("sec_filing_tool error ticker=%s error=%s", ticker, exc, exc_info=True)

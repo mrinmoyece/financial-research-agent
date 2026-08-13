@@ -10,7 +10,7 @@ pattern for accumulating tool outputs across a multi-step workflow.
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NotRequired
 
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypedDict
@@ -38,6 +38,7 @@ class NewsItem(TypedDict):
     sentiment: Literal["positive", "neutral", "negative"]
     relevance_score: float  # 0-1
     summary: str
+    url: NotRequired[str]
 
 
 class MacroIndicator(TypedDict):
@@ -46,6 +47,24 @@ class MacroIndicator(TypedDict):
     unit: str  # "%", "bps", "USD"
     trend: Literal["rising", "flat", "falling"]
     impact_on_equities: str  # concise one-liner
+
+
+class SourceRecord(TypedDict):
+    source_id: str
+    provider: str
+    source_type: Literal["market_data", "news", "macro", "sec_filing"]
+    locator: str
+    retrieved_at: str
+    ticker: str | None
+    label: str
+    content_sha256: str
+
+
+class Citation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(pattern=r"^src_[a-f0-9]{12}$")
+    claim: str = Field(min_length=1, max_length=500)
 
 
 class ResearchReport(TypedDict):
@@ -58,6 +77,7 @@ class ResearchReport(TypedDict):
     price_target_12m: float | None
     confidence_score: float  # 0-1
     data_sources_used: list[str]
+    citations: list[dict[str, str]]
     generated_at: str  # ISO-8601
 
 
@@ -75,6 +95,7 @@ class ResearchReportPayload(BaseModel):
     price_target_12m: float | None = Field(default=None, allow_inf_nan=False)
     confidence_score: float = Field(ge=0, le=1)
     data_sources_used: list[str] = Field(max_length=20)
+    citations: list[Citation] = Field(min_length=1, max_length=50)
     generated_at: str
 
 
@@ -95,7 +116,11 @@ class AgentState(TypedDict):
     ticker_analyses: Annotated[list[TickerAnalysis], operator.add]
     news_items: Annotated[list[NewsItem], operator.add]
     macro_indicators: Annotated[list[MacroIndicator], operator.add]
+    sources: Annotated[list[SourceRecord], operator.add]
     tool_calls_log: Annotated[list[dict[str, Any]], operator.add]  # audit trail
+    model_calls: int
+    input_tokens: int
+    output_tokens: int
 
     # ── Intermediate reasoning ──────────────────────────────────────
     messages: Annotated[list[dict[str, Any]], operator.add]  # LLM message history

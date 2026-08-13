@@ -5,7 +5,7 @@ Autonomous equity research agent built with **LangGraph** and **LangChain**. Giv
 > [!IMPORTANT]
 > This software produces machine-generated research, not investment advice. Outputs can be incomplete or incorrect and require qualified human review before any financial decision.
 
-Demonstrates: LangGraph stateful workflows · LangChain tool calling · ReAct agent loop · FastAPI async API · CI security and quality gates.
+Demonstrates: LangGraph stateful workflows · durable at-least-once workers · grounded citations · tenant RBAC · approval gates · bounded ReAct execution · CI security and quality gates.
 
 ---
 
@@ -15,7 +15,7 @@ Demonstrates: LangGraph stateful workflows · LangChain tool calling · ReAct ag
 POST /api/v1/research
         │
         ▼
-  [FastAPI Server]  ── background task ──►  LangGraph Graph
+  [FastAPI Server] ── Redis queue/lease ──► [Worker] ──► LangGraph Graph
                                                     │
                                            validate_input node
                                            (normalise tickers, set depth)
@@ -32,10 +32,11 @@ POST /api/v1/research
                                            └─────────────────────────┘
                                                     │
                                            analyst_node
-                                           (synthesis → ResearchReport JSON)
+                                           (grounded, cited ResearchReport JSON)
                                                     │
                                                    END
                                                     │
+                                  approval gate ◄── approver releases report
                                             ◄── poll GET /api/v1/research/{job_id}
 ```
 
@@ -68,8 +69,12 @@ financial-research-agent/
 │   ├── graph/
 │   │   └── workflow.py           # LangGraph graph definition + run_research()
 │   └── api/
-│       ├── server.py             # FastAPI: auth, jobs, health, metrics
+│       ├── server.py             # FastAPI: tenant RBAC, approval, health, metrics
+│       ├── job_queue.py          # Leases, retries, stale recovery, dead letters
+│       ├── governance.py         # Distributed limits and hash-chained audit
 │       └── job_store.py          # Namespaced Redis/in-memory job state
+│   ├── security/                 # Principal identity and content screening
+│   └── worker.py                 # Durable worker process
 ├── tests/
 │   ├── unit/
 │   │   ├── test_tools.py         # Tool unit tests (fully offline — no API keys needed)
@@ -117,8 +122,10 @@ cp .env.example .env
 # 3. Run the agent interactively (CLI)
 python scripts/run_graph_interactive.py --ticker NVDA --depth standard
 
-# 4. Or start the API server
+# 4. Or start Redis, the API, and a worker
+docker run --rm -p 6379:6379 redis:7-alpine
 uvicorn main:app --port 8080 --reload
+python -m src.worker
 
 # 5. Submit a research job
 curl -X POST http://localhost:8080/api/v1/research \
@@ -133,7 +140,7 @@ curl http://localhost:8080/api/v1/research/<job_id>
 
 ## LLM provider configuration
 
-The agent supports three providers with zero code change — only env vars differ:
+The agent supports three providers and an ordered fallback chain with zero code change:
 
 | Provider | Use case | Cost |
 |---|---|---|
@@ -148,6 +155,7 @@ GITHUB_TOKEN=github_pat_xxxxx
 
 # Azure OpenAI (production)
 LLM_PROVIDER=azure_openai
+LLM_FALLBACK_PROVIDERS=openai
 AZURE_OPENAI_ENDPOINT=https://YOUR_RESOURCE.openai.azure.com/
 AZURE_OPENAI_API_KEY=xxxxx
 AZURE_CHAT_DEPLOYMENT=gpt-4o
@@ -171,12 +179,14 @@ pytest tests/integration/ -v
 make gate
 ```
 
+The deterministic pull-request gate never calls paid providers. Maintainers can manually run the protected `Live provider evals` workflow in the `live-evals` GitHub environment after configuring its secrets and required reviewers.
+
 ---
 
 ## Docker Compose (full local stack)
 
 ```bash
-# Start the development stack: agent + Redis + Prometheus + Grafana
+# Start the development stack: API + worker + Redis + Prometheus + Grafana
 GITHUB_TOKEN=<your-token> GRAFANA_ADMIN_PASSWORD=<local-password> docker compose up -d
 
 # Run an end-to-end test
@@ -211,7 +221,7 @@ kubectl create secret generic financial-research-agent-secrets \
   --from-literal=ALPHA_VANTAGE_API_KEY=<key> \
   --from-literal=NEWSAPI_API_KEY=<key> \
   --from-literal=LANGSMITH_API_KEY=<key> \
-  --from-literal=API_KEY=<long-random-service-key> \
+  --from-literal=API_PRINCIPALS_JSON='<tenant principal JSON>' \
   --from-literal=REDIS_URL=rediss://<managed-redis-endpoint>:6379
 
 # 2. Update the immutable image digest and CORS origin in k8s/deployment.yaml
@@ -223,6 +233,7 @@ kubectl apply -f k8s/deployment.yaml
 
 # 4. Verify rollout
 kubectl rollout status deployment/financial-research-agent -n agentforge
+kubectl rollout status deployment/financial-research-worker -n agentforge
 kubectl get pods -n agentforge
 
 # 5. Test the deployment
@@ -234,10 +245,11 @@ The production manifest intentionally does not deploy Redis; `REDIS_URL` must re
 
 ### Scaling
 
-The HPA automatically scales between 2–8 replicas based on CPU (70%) and memory (80%) utilisation. To manually scale:
+The API HPA scales between 2–8 replicas based on CPU and memory. Scale workers separately from queue age and provider quotas:
 
 ```bash
 kubectl scale deployment financial-research-agent --replicas=4 -n agentforge
+kubectl scale deployment financial-research-worker --replicas=4 -n agentforge
 ```
 
 ---
@@ -274,19 +286,22 @@ This guides you through: creating the tool file, registering it in `research_age
 |--------|------|-------------|
 | `POST` | `/api/v1/research` | Submit research job |
 | `GET` | `/api/v1/research/{job_id}` | Poll for result |
+| `POST` | `/api/v1/research/{job_id}/approve` | Release an approval-gated report |
+| `POST` | `/api/v1/research/{job_id}/reject` | Reject and keep a report hidden |
 | `GET` | `/api/v1/research` | List recent jobs |
 | `GET` | `/api/v1/health` | Liveness check |
 | `GET` | `/api/v1/ready` | Readiness check |
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/docs` | Swagger UI |
 
-The production Kubernetes manifest sets `API_AUTH_REQUIRED=true` and `EXPOSE_API_DOCS=false`. Research endpoints require `X-API-Key`; the key identifies the calling service, not an end user. Keep user authorization, rate limits, and TLS at the gateway.
+The production manifest sets `API_AUTH_REQUIRED=true`, `REQUIRE_REPORT_APPROVAL=true`, and `EXPOSE_API_DOCS=false`. `API_PRINCIPALS_JSON` maps each credential to a tenant and roles (`reader`, `researcher`, `approver`, `admin`). Credentials identify services, not end users; keep interactive identity, TLS, and edge controls at the gateway.
 
 ### Sample request
 
 ```json
 POST /api/v1/research
-X-API-Key: <service-key>
+X-API-Key: <researcher-key>
+Idempotency-Key: portfolio-refresh-2026-04-14
 {
   "query": "Analyse NVIDIA for long-term investment in the AI infrastructure cycle",
   "tickers": ["NVDA"],
@@ -294,12 +309,14 @@ X-API-Key: <service-key>
 }
 ```
 
-### Sample response (completed job)
+### Sample response (approved job)
 
 ```json
 {
   "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "status": "completed",
+  "status": "approved",
+  "tenant_id": "portfolio-team",
+  "principal_id": "research-service",
   "created_at": "2024-11-21T20:00:00Z",
   "completed_at": "2024-11-21T20:00:45Z",
   "tool_calls_count": 4,
@@ -313,6 +330,7 @@ X-API-Key: <service-key>
     "price_target_12m": 1050.0,
     "confidence_score": 0.87,
     "data_sources_used": ["market_data", "news", "macro", "sec_filings"],
+    "citations": [{"source_id": "src_a1b2c3d4e5f6", "claim": "Revenue growth"}],
     "generated_at": "2024-11-21T20:00:44Z"
   }
 }

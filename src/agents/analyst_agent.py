@@ -15,7 +15,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from src.config.llm import build_llm
+from src.config.llm import build_llm_candidates
 from src.config.settings import get_settings
 from src.models.state import AgentState, ResearchReport, ResearchReportPayload
 
@@ -45,8 +45,12 @@ Output ONLY valid JSON matching this schema (no markdown fences):
   "recommended_action": "STRONG_BUY|BUY|HOLD|SELL|STRONG_SELL",
   "price_target_12m": <float or null>,
   "confidence_score": <0.0–1.0>,
-  "data_sources_used": ["market_data", "news", "macro", "sec_filings"]
+  "data_sources_used": ["market_data", "news", "macro", "sec_filings"],
+  "citations": [{"source_id": "src_...", "claim": "specific claim supported by this source"}]
 }
+
+Every material claim must have at least one citation. Use only source IDs from
+the supplied Source Registry. Never cite a source that was not supplied.
 """
 
 
@@ -100,6 +104,14 @@ def _build_analyst_prompt(state: AgentState) -> str:
             label = f"{m['name']}: {m['value']}{m['unit']} ({m['trend']})"
             sections.append(f"- **{label}** — {m['impact_on_equities']}")
 
+    sections.append("\n## Source Registry")
+    for source in state.get("sources", []):
+        sections.append(
+            f"- {source['source_id']}: {source.get('label', source['source_type'])} via "
+            f"{source['provider']} ({source['locator']}); "
+            f"content_sha256={source.get('content_sha256', 'unavailable')}"
+        )
+
     sections.append("\nBased on all data above, produce the investment research report JSON.")
     return "\n".join(sections)
 
@@ -113,7 +125,10 @@ def analyst_node(state: AgentState) -> dict[str, Any]:
     logger.info("analyst_node: synthesising report for tickers=%s", state["tickers"])
 
     settings = get_settings()
-    llm = build_llm(settings)
+    llms = build_llm_candidates(settings)
+    model_calls = state.get("model_calls", 0)
+    input_tokens = state.get("input_tokens", 0)
+    output_tokens = state.get("output_tokens", 0)
 
     prompt = _build_analyst_prompt(state)
 
@@ -123,7 +138,27 @@ def analyst_node(state: AgentState) -> dict[str, Any]:
     ]
 
     try:
-        response = llm.invoke(messages)
+        response = None
+        last_error: Exception | None = None
+        for index, llm in enumerate(llms):
+            if model_calls >= settings.max_model_calls_per_job:
+                break
+            model_calls += 1
+            try:
+                response = llm.invoke(messages)
+                if index:
+                    logger.warning("analyst_node: LLM fallback provider index=%d used", index)
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.error("analyst_node: LLM provider index=%d failed", index)
+        if response is None:
+            if model_calls >= settings.max_model_calls_per_job:
+                raise RuntimeError("Per-job model-call budget exhausted") from last_error
+            raise RuntimeError("All configured LLM providers failed") from last_error
+        if response.usage_metadata is not None:
+            input_tokens += response.usage_metadata.get("input_tokens", 0)
+            output_tokens += response.usage_metadata.get("output_tokens", 0)
         if not isinstance(response.content, str):
             raise ValueError("Analyst response must be plain JSON text")
         raw_json = response.content.strip()
@@ -141,6 +176,10 @@ def analyst_node(state: AgentState) -> dict[str, Any]:
                 "generated_at": datetime.now(UTC).isoformat(),
             }
         )
+        allowed_source_ids = {source["source_id"] for source in state.get("sources", [])}
+        cited_source_ids = {citation.source_id for citation in validated.citations}
+        if not cited_source_ids.issubset(allowed_source_ids):
+            raise ValueError("Report cited a source outside the supplied registry")
         report = cast(ResearchReport, validated.model_dump())
         logger.info(
             "analyst_node: report generated action=%s risk=%s confidence=%.2f",
@@ -148,11 +187,29 @@ def analyst_node(state: AgentState) -> dict[str, Any]:
             report["risk_rating"],
             report["confidence_score"],
         )
-        return {"report": report, "error": None}
+        return {
+            "report": report,
+            "error": None,
+            "model_calls": model_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
 
     except json.JSONDecodeError as exc:
         logger.error("analyst_node: failed to parse LLM JSON output: %s", exc)
-        return {"report": None, "error": f"JSON parse error: {exc}"}
+        return {
+            "report": None,
+            "error": f"JSON parse error: {exc}",
+            "model_calls": model_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
     except Exception as exc:
         logger.error("analyst_node: unexpected error: %s", exc, exc_info=True)
-        return {"report": None, "error": str(exc)}
+        return {
+            "report": None,
+            "error": str(exc),
+            "model_calls": model_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
