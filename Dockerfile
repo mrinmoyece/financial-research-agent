@@ -1,12 +1,12 @@
 # Digest-pinned base image; Dependabot keeps the digest current.
-FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS builder
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS builder
 
 WORKDIR /build
 
 COPY requirements.lock .
 RUN pip install --prefix=/install --no-cache-dir --require-hashes -r requirements.lock
 
-FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS runtime
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS runtime
 
 LABEL org.opencontainers.image.title="financial-research-agent"
 LABEL org.opencontainers.image.description="LangGraph autonomous equity research agent"
