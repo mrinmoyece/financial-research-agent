@@ -2,161 +2,153 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
-  pull_request:
     branches: [main]
+  pull_request:
 
-env:
-  PYTHON_VERSION: "3.12"
-  # Use GitHub Models free tier in CI — no Azure key needed
-  LLM_PROVIDER: github_models
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # All data API keys absent — tools fall back to mock data automatically
-  ALPHA_VANTAGE_API_KEY: ""
-  NEWSAPI_API_KEY: ""
-  LANGCHAIN_TRACING_V2: "false"
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  PYTHON_VERSION: "3.12"
+  LLM_PROVIDER: github_models
+  GITHUB_TOKEN: test-token-ci
+  ALPHA_VANTAGE_API_KEY: ""
+  NEWSAPI_API_KEY: ""
+  LANGCHAIN_TRACING_V2: "false"
+
 jobs:
-  # ── Secret scan ───────────────────────────────────────────────────────────
-  secrets-scan:
-    name: Secret Scan (Gitleaks)
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: make lint
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: make test
+      - if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: error
+
+  evals:
+    name: Evals (quality gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: make evals
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - name: Install Gitleaks
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Scan repository history for committed secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: bandit -r src -ll --skip B101
+      - run: pip-audit --strict --requirement requirements.lock
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          deny-licenses: AGPL-1.0-only,AGPL-3.0-only
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [tests, security]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: docker build -t financial-research-agent:ci .
+      - name: Verify non-root runtime
+        run: test "$(docker run --rm --entrypoint id financial-research-agent:ci -u)" != "0"
+      - name: Scan image and generate CycloneDX SBOM
         run: |
-          curl -sSL -o gitleaks.tar.gz \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.27.1/gitleaks_8.27.1_linux_x64.tar.gz
-          tar -xzf gitleaks.tar.gz gitleaks
-          chmod +x gitleaks
-      - name: Run Gitleaks
-        run: ./gitleaks detect --source . --no-banner --redact --exit-code 1
-
-  # ── Lint & format ─────────────────────────────────────────────────────────
-  lint:
-    name: Lint & Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+          docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            image --exit-code 1 --ignore-unfixed --pkg-types os,library \
+            --severity CRITICAL,HIGH financial-research-agent:ci
+          docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$PWD:/work" \
+            aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            image --format cyclonedx --output /work/sbom.json financial-research-agent:ci
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-      - run: pip install ruff mypy
-      - run: ruff check src/ tests/
-      - run: ruff format --check src/ tests/
-      - run: mypy src/ --ignore-missing-imports
+          name: runtime-sbom
+          path: sbom.json
+          if-no-files-found: error
 
-  # ── Security scan ─────────────────────────────────────────────────────────
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-      - run: pip install bandit safety
-      - name: Bandit SAST
-        run: bandit -r src/ -ll --skip B101
-      - name: Dependency vulnerability scan
-        run: safety check -r requirements.txt
-
-  # ── Unit tests ────────────────────────────────────────────────────────────
-  test-unit:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-      - run: pip install -r requirements.txt
-      - name: Run unit tests
-        run: |
-          pytest tests/unit/ \
-            --cov=src \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            --cov-fail-under=80 \
-            -v
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          file: ./coverage.xml
-          fail_ci_if_error: false
-
-  # ── Integration tests ─────────────────────────────────────────────────────
-  test-integration:
-    name: Integration Tests (API)
-    runs-on: ubuntu-latest
-    needs: test-unit
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-      - run: pip install -r requirements.txt
-      - name: Run integration tests
-        run: pytest tests/integration/ -v --timeout=60
-
-  # ── Docker build ──────────────────────────────────────────────────────────
-  docker-build:
-    name: Docker Build & Scan
-    runs-on: ubuntu-latest
-    needs: test-unit
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build image
-        run: docker build -t financial-research-agent:ci .
-      - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: financial-research-agent:ci
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: 1
-          ignore-unfixed: true
-
-  # ── Push to registry ──────────────────────────────────────────────────────
   push:
-    name: Push to Container Registry
-    runs-on: ubuntu-latest
-    needs: [test-integration, docker-build]
+    name: Publish image
     if: github.ref == 'refs/heads/main'
+    needs: [lint, tests, evals, security, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,prefix=sha-
-            type=raw,value=latest
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Authenticate to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and publish with provenance and SBOM attestations
+        run: |
+          docker buildx build \
+            --provenance=mode=max \
+            --sbom=true \
+            --tag "ghcr.io/${GITHUB_REPOSITORY}:sha-${GITHUB_SHA}" \
+            --push .

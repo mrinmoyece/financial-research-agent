@@ -17,16 +17,43 @@ from src.models.state import MacroIndicator
 logger = logging.getLogger(__name__)
 
 _MOCK_MACRO: list[MacroIndicator] = [
-    MacroIndicator(name="US CPI YoY", value=3.2, unit="%", trend="falling",
-                   impact_on_equities="Disinflation supports rate cuts → positive for growth stocks"),
-    MacroIndicator(name="Fed Funds Rate", value=5.25, unit="%", trend="flat",
-                   impact_on_equities="Elevated rates compress valuation multiples for high-PE names"),
-    MacroIndicator(name="US GDP Growth QoQ", value=2.8, unit="%", trend="rising",
-                   impact_on_equities="Strong growth supports corporate earnings — broadly positive"),
-    MacroIndicator(name="10Y Treasury Yield", value=4.45, unit="%", trend="rising",
-                   impact_on_equities="Rising yields increase discount rate → headwind for long-duration equities"),
-    MacroIndicator(name="USD Index (DXY)", value=104.2, unit="index", trend="flat",
-                   impact_on_equities="Strong USD headwind for multinationals with overseas revenue"),
+    MacroIndicator(
+        name="US CPI YoY",
+        value=3.2,
+        unit="%",
+        trend="falling",
+        impact_on_equities="Disinflation supports rate cuts → positive for growth stocks",
+    ),
+    MacroIndicator(
+        name="Fed Funds Rate",
+        value=5.25,
+        unit="%",
+        trend="flat",
+        impact_on_equities="Elevated rates compress valuation multiples for high-PE names",
+    ),
+    MacroIndicator(
+        name="US GDP Growth QoQ",
+        value=2.8,
+        unit="%",
+        trend="rising",
+        impact_on_equities="Strong growth supports corporate earnings — broadly positive",
+    ),
+    MacroIndicator(
+        name="10Y Treasury Yield",
+        value=4.45,
+        unit="%",
+        trend="rising",
+        impact_on_equities=(
+            "Rising yields increase discount rate → headwind for long-duration equities"
+        ),
+    ),
+    MacroIndicator(
+        name="USD Index (DXY)",
+        value=104.2,
+        unit="index",
+        trend="flat",
+        impact_on_equities="Strong USD headwind for multinationals with overseas revenue",
+    ),
 ]
 
 
@@ -57,8 +84,10 @@ def get_macro_indicators() -> list[MacroIndicator]:
     api_key = settings.alpha_vantage_api_key.get_secret_value()
 
     if not api_key:
-        logger.warning("Alpha Vantage key absent — returning mock macro indicators")
-        return _MOCK_MACRO
+        if settings.allow_mock_data:
+            logger.warning("Alpha Vantage key absent — returning illustrative macro indicators")
+            return _MOCK_MACRO
+        return []
 
     try:
         cpi = _fetch_indicator("CPI", api_key)
@@ -67,30 +96,54 @@ def get_macro_indicators() -> list[MacroIndicator]:
 
         indicators: list[MacroIndicator] = []
         if cpi is not None:
-            indicators.append(MacroIndicator(
-                name="US CPI YoY", value=cpi, unit="%",
-                trend="falling" if cpi < 3.5 else "rising",
-                impact_on_equities="Disinflation supports rate cuts → positive for growth stocks"
-                                   if cpi < 3.5 else "Persistent inflation delays cuts → valuation headwind",
-            ))
+            indicators.append(
+                MacroIndicator(
+                    name="US CPI YoY",
+                    value=cpi,
+                    unit="%",
+                    trend="falling" if cpi < 3.5 else "rising",
+                    impact_on_equities=(
+                        "Disinflation supports rate cuts → positive for growth stocks"
+                        if cpi < 3.5
+                        else "Persistent inflation delays cuts → valuation headwind"
+                    ),
+                )
+            )
         if federal_funds is not None:
-            indicators.append(MacroIndicator(
-                name="Fed Funds Rate", value=federal_funds, unit="%",
-                trend="flat",
-                impact_on_equities="Elevated rates compress valuation multiples for high-PE names",
-            ))
+            indicators.append(
+                MacroIndicator(
+                    name="Fed Funds Rate",
+                    value=federal_funds,
+                    unit="%",
+                    trend="flat",
+                    impact_on_equities=(
+                        "Elevated rates compress valuation multiples for high-PE names"
+                    ),
+                )
+            )
         if real_gdp is not None:
-            indicators.append(MacroIndicator(
-                name="US Real GDP Growth", value=real_gdp, unit="%",
-                trend="rising" if real_gdp > 2.0 else "falling",
-                impact_on_equities="Strong growth supports corporate earnings — broadly positive"
-                                   if real_gdp > 2.0 else "Slowdown may indicate earnings risk ahead",
-            ))
+            indicators.append(
+                MacroIndicator(
+                    name="US Real GDP Growth",
+                    value=real_gdp,
+                    unit="%",
+                    trend="rising" if real_gdp > 2.0 else "falling",
+                    impact_on_equities=(
+                        "Strong growth supports corporate earnings — broadly positive"
+                        if real_gdp > 2.0
+                        else "Slowdown may indicate earnings risk ahead"
+                    ),
+                )
+            )
 
-        # Supplement with remaining mock items for completeness
-        indicators += [i for i in _MOCK_MACRO if i["name"] not in {x["name"] for x in indicators}]
+        if settings.allow_mock_data:
+            indicators += [
+                item
+                for item in _MOCK_MACRO
+                if item["name"] not in {indicator["name"] for indicator in indicators}
+            ]
         return indicators
 
     except Exception as exc:
         logger.error("macro_tool error=%s", exc, exc_info=True)
-        return _MOCK_MACRO
+        return _MOCK_MACRO if settings.allow_mock_data else []

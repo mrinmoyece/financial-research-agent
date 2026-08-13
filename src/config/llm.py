@@ -28,40 +28,44 @@ def build_llm(settings: Settings | None = None) -> BaseChatModel:
     cfg = settings or get_settings()
 
     if cfg.llm_provider == "azure_openai":
-        logger.info("LLM: Azure OpenAI endpoint=%s deployment=%s",
-                    cfg.azure_openai_endpoint, cfg.azure_chat_deployment)
+        logger.info(
+            "LLM: Azure OpenAI endpoint=%s deployment=%s",
+            cfg.azure_openai_endpoint,
+            cfg.azure_chat_deployment,
+        )
         return AzureChatOpenAI(
             azure_endpoint=cfg.azure_openai_endpoint,
-            api_key=cfg.azure_openai_api_key.get_secret_value(),
+            api_key=cfg.azure_openai_api_key,
             api_version=cfg.azure_openai_api_version,
             azure_deployment=cfg.azure_chat_deployment,
             temperature=cfg.llm_temperature,
-            max_tokens=cfg.llm_max_tokens,
+            max_completion_tokens=cfg.llm_max_tokens,
             # Retry config — LangChain respects these natively
             max_retries=cfg.max_tool_retries,
         )
 
     if cfg.llm_provider == "github_models":
-        logger.info("LLM: GitHub Models endpoint=%s model=%s",
-                    cfg.github_models_endpoint, cfg.github_chat_model)
-        # GitHub Models is OpenAI-compatible; AzureChatOpenAI works via base_url override
-        return AzureChatOpenAI(
-            azure_endpoint=cfg.github_models_endpoint,
-            api_key=cfg.github_token.get_secret_value(),
-            api_version=cfg.azure_openai_api_version,
-            azure_deployment=cfg.github_chat_model,
+        logger.info(
+            "LLM: GitHub Models endpoint=%s model=%s",
+            cfg.github_models_endpoint,
+            cfg.github_chat_model,
+        )
+        return ChatOpenAI(
+            base_url=cfg.github_models_endpoint,
+            api_key=cfg.github_token,
+            model=cfg.github_chat_model,
             temperature=cfg.llm_temperature,
-            max_tokens=cfg.llm_max_tokens,
+            max_completion_tokens=cfg.llm_max_tokens,
             max_retries=cfg.max_tool_retries,
         )
 
     # openai direct
     logger.info("LLM: OpenAI direct model=%s", cfg.openai_chat_model)
     return ChatOpenAI(
-        api_key=cfg.openai_api_key.get_secret_value(),
+        api_key=cfg.openai_api_key,
         model=cfg.openai_chat_model,
         temperature=cfg.llm_temperature,
-        max_tokens=cfg.llm_max_tokens,
+        max_completion_tokens=cfg.llm_max_tokens,
         max_retries=cfg.max_tool_retries,
     )
 

@@ -7,10 +7,13 @@ metadata:
 # ── Secret (create manually — never commit real values) ───────────────────────
 # kubectl create secret generic financial-research-agent-secrets \
 #   --namespace agentforge \
+#   --from-literal=AZURE_OPENAI_ENDPOINT=https://YOUR_RESOURCE.openai.azure.com/ \
 #   --from-literal=AZURE_OPENAI_API_KEY=<value> \
 #   --from-literal=ALPHA_VANTAGE_API_KEY=<value> \
 #   --from-literal=NEWSAPI_API_KEY=<value> \
-#   --from-literal=LANGSMITH_API_KEY=<value>
+#   --from-literal=LANGSMITH_API_KEY=<value> \
+#   --from-literal=API_KEY=<long-random-value> \
+#   --from-literal=REDIS_URL=rediss://<managed-redis-endpoint>:6379
 ---
 # ── ConfigMap (non-sensitive config) ──────────────────────────────────────────
 apiVersion: v1
@@ -29,7 +32,12 @@ data:
   LANGSMITH_PROJECT: "financial-research-agent-prod"
   API_PORT: "8080"
   API_WORKERS: "4"
-  REDIS_URL: "redis://financial-research-redis:6379"
+  REDIS_REQUIRED: "true"
+  ALLOW_MOCK_DATA: "false"
+  API_AUTH_REQUIRED: "true"
+  MAX_REQUEST_BODY_BYTES: "65536"
+  EXPOSE_API_DOCS: "false"
+  CORS_ALLOW_ORIGINS: "https://research.example.com"
 ---
 # ── Deployment ─────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
@@ -42,6 +50,8 @@ metadata:
     version: "1.0.0"
 spec:
   replicas: 2
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
   selector:
     matchLabels:
       app: financial-research-agent
@@ -60,17 +70,19 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1001
-        runAsGroup: 1001
-        fsGroup: 1001
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: agent
-          image: ghcr.io/YOUR_ORG/financial-research-agent:latest
-          imagePullPolicy: Always
+          image: ghcr.io/YOUR_ORG/financial-research-agent@sha256:REPLACE_WITH_IMAGE_DIGEST
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
@@ -104,6 +116,16 @@ spec:
                 secretKeyRef:
                   name: financial-research-agent-secrets
                   key: LANGSMITH_API_KEY
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: financial-research-agent-secrets
+                  key: API_KEY
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: financial-research-agent-secrets
+                  key: REDIS_URL
           resources:
             requests:
               cpu: "250m"
@@ -119,6 +141,12 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 12
           readinessProbe:
             httpGet:
               path: /api/v1/ready
@@ -139,6 +167,13 @@ spec:
         - name: tmp
           emptyDir: {}
       terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: financial-research-agent
 ---
 # ── Service ────────────────────────────────────────────────────────────────────
 apiVersion: v1
@@ -182,44 +217,13 @@ spec:
           type: Utilization
           averageUtilization: 80
 ---
-# ── Redis ──────────────────────────────────────────────────────────────────────
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
-  name: financial-research-redis
+  name: financial-research-agent
   namespace: agentforge
 spec:
-  replicas: 1
+  minAvailable: 1
   selector:
     matchLabels:
-      app: financial-research-redis
-  template:
-    metadata:
-      labels:
-        app: financial-research-redis
-    spec:
-      containers:
-        - name: redis
-          image: redis:7-alpine
-          ports:
-            - containerPort: 6379
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "200m"
-              memory: "256Mi"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: financial-research-redis
-  namespace: agentforge
-spec:
-  selector:
-    app: financial-research-redis
-  ports:
-    - port: 6379
-      targetPort: 6379
-  type: ClusterIP
+      app: financial-research-agent

@@ -42,24 +42,40 @@ class Settings(BaseSettings):
     newsapi_api_key: SecretStr = SecretStr("")
 
     # ── Agent behaviour ───────────────────────────────────────────
-    max_tool_retries: int = 3
-    llm_temperature: float = 0.1       # low for financial analysis
-    llm_max_tokens: int = 4096
-    react_max_iterations: int = 15
+    max_tool_retries: int = Field(3, ge=0, le=10)
+    llm_temperature: float = Field(0.1, ge=0, le=2)
+    llm_max_tokens: int = Field(4096, ge=256, le=32768)
+    react_max_iterations: int = Field(15, ge=1, le=50)
+    allow_mock_data: bool = True
 
     # ── Observability ─────────────────────────────────────────────
     langsmith_api_key: SecretStr = SecretStr("")
     langsmith_project: str = "financial-research-agent"
-    langsmith_tracing: bool = False     # set LANGCHAIN_TRACING_V2=true to enable
+    langsmith_tracing: bool = False  # set LANGCHAIN_TRACING_V2=true to enable
 
     # ── API server ────────────────────────────────────────────────
-    api_host: str = "0.0.0.0"
-    api_port: int = 8080
-    api_workers: int = 4
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(8080, ge=1, le=65535)
+    api_workers: int = Field(4, ge=1, le=32)
+    api_auth_required: bool = False
+    api_key: SecretStr = SecretStr("")
+    max_request_body_bytes: int = Field(65536, ge=1024, le=1048576)
+    cors_allow_origins: str = "http://localhost:3000,http://localhost:8080"
+    expose_api_docs: bool = True
 
     # ── Redis (optional result cache) ─────────────────────────────
     redis_url: str = "redis://localhost:6379"
-    cache_ttl_seconds: int = 3600
+    redis_required: bool = False
+    cache_ttl_seconds: int = Field(3600, ge=60, le=604800)
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Return the configured, de-duplicated CORS origin allowlist."""
+        return list(
+            dict.fromkeys(
+                origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()
+            )
+        )
 
 
 @lru_cache(maxsize=1)

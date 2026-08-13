@@ -15,14 +15,14 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from langchain_core.messages import AIMessage
 
 from src.config.llm import build_llm
 from src.config.settings import get_settings
-from src.models.state import AgentState
+from src.models.state import AgentState, MacroIndicator, NewsItem, TickerAnalysis
 from src.tools.macro_tool import get_macro_indicators
 from src.tools.market_data_tool import get_market_data
 from src.tools.news_tool import get_financial_news
@@ -43,8 +43,9 @@ TOOL_CALL_TIMEOUT_SECONDS = 30
 _TOOL_CALL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tool-call")
 
 
-def _invoke_tool_with_timeout(tool_fn: Any, tool_args: dict[str, Any],
-                               timeout: float = TOOL_CALL_TIMEOUT_SECONDS) -> Any:
+def _invoke_tool_with_timeout(
+    tool_fn: Any, tool_args: dict[str, Any], timeout: float = TOOL_CALL_TIMEOUT_SECONDS
+) -> Any:
     """
     Run a (synchronous) LangChain tool's .invoke() with a hard wall-clock
     timeout, so a single hung tool call cannot stall the entire ReAct loop.
@@ -58,9 +59,8 @@ def _invoke_tool_with_timeout(tool_fn: Any, tool_args: dict[str, Any],
     try:
         return future.result(timeout=timeout)
     except FutureTimeoutError as exc:
-        raise TimeoutError(
-            f"Tool call timed out after {timeout}s"
-        ) from exc
+        raise TimeoutError(f"Tool call timed out after {timeout}s") from exc
+
 
 # All tools the research agent can call
 RESEARCH_TOOLS = [
@@ -99,17 +99,18 @@ def research_node(state: AgentState) -> dict[str, Any]:
     Returns partial state updates — LangGraph merges these into the full state
     using the Annotated operator.add reducers defined in AgentState.
     """
-    logger.info("research_node: starting ticker=%s depth=%s",
-                state["tickers"], state["research_depth"])
+    logger.info(
+        "research_node: starting ticker=%s depth=%s", state["tickers"], state["research_depth"]
+    )
 
     settings = get_settings()
     llm = build_llm(settings).bind_tools(RESEARCH_TOOLS)
 
     # Build initial message for the LLM
     depth_instruction = {
-        "quick":    "Call get_market_data only for each ticker.",
+        "quick": "Call get_market_data only for each ticker.",
         "standard": "Call get_market_data, get_financial_news, and get_macro_indicators.",
-        "deep":     "Call all available tools including get_sec_filing_summary.",
+        "deep": "Call all available tools including get_sec_filing_summary.",
     }[state["research_depth"]]
 
     user_message = (
@@ -118,23 +119,28 @@ def research_node(state: AgentState) -> dict[str, Any]:
         f"Original query: {state['query']}"
     )
 
-    messages = [
+    messages: list[Any] = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user",   "content": user_message},
+        {"role": "user", "content": user_message},
     ]
 
-    ticker_analyses = []
-    news_items = []
-    macro_indicators = []
-    tool_calls_log = []
+    ticker_analyses: list[TickerAnalysis] = []
+    news_items: list[NewsItem] = []
+    macro_indicators: list[MacroIndicator] = []
+    tool_calls_log: list[dict[str, Any]] = []
     iterations = 0
     max_iterations = settings.react_max_iterations
 
     while iterations < max_iterations:
         iterations += 1
         response: AIMessage = llm.invoke(messages)
-        messages.append({"role": "assistant", "content": response.content or "",
-                          "tool_calls": [tc.model_dump() for tc in (response.tool_calls or [])]})
+        messages.append(
+            {
+                "role": "assistant",
+                "content": response.content or "",
+                "tool_calls": [dict(tc) for tc in (response.tool_calls or [])],
+            }
+        )
 
         if not response.tool_calls:
             logger.info("research_node: no more tool calls — done after %d iterations", iterations)
@@ -162,43 +168,64 @@ def research_node(state: AgentState) -> dict[str, Any]:
                     result = {"error": str(exc)}
 
             # Classify result into the correct state bucket
-            if tool_name == "get_market_data" and isinstance(result, dict) and "error" not in result:
-                ticker_analyses.append(result)
+            if (
+                tool_name == "get_market_data"
+                and isinstance(result, dict)
+                and "error" not in result
+            ):
+                ticker_analyses.append(cast(TickerAnalysis, result))
             elif tool_name == "get_financial_news" and isinstance(result, list):
                 news_items.extend(result)
             elif tool_name == "get_macro_indicators" and isinstance(result, list):
                 macro_indicators.extend(result)
 
             # Always log every tool call for audit/observability
-            tool_calls_log.append({
-                "tool": tool_name,
-                "args": tool_args,
-                "result_type": type(result).__name__,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "iteration": iterations,
-            })
+            tool_calls_log.append(
+                {
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "result_type": type(result).__name__,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "iteration": iterations,
+                }
+            )
 
             # Feed result back to LLM as ToolMessage
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": json.dumps(result, default=str),
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps(result, default=str),
+                }
+            )
 
     if iterations >= max_iterations:
         logger.warning("research_node: hit max_iterations=%d — stopping", max_iterations)
 
     logger.info(
         "research_node: complete analyses=%d news=%d macro=%d tool_calls=%d",
-        len(ticker_analyses), len(news_items), len(macro_indicators), len(tool_calls_log),
+        len(ticker_analyses),
+        len(news_items),
+        len(macro_indicators),
+        len(tool_calls_log),
     )
+
+    error = None
+    if not ticker_analyses and not news_items:
+        error = "No research data was available from the configured providers."
 
     return {
         "ticker_analyses": ticker_analyses,
-        "news_items":      news_items,
+        "news_items": news_items,
         "macro_indicators": macro_indicators,
-        "tool_calls_log":  tool_calls_log,
-        "messages": [{"role": "system", "content": f"Research gathered {len(ticker_analyses)} "
-                                                     f"ticker analyses, {len(news_items)} news items, "
-                                                     f"{len(macro_indicators)} macro indicators."}],
+        "tool_calls_log": tool_calls_log,
+        "messages": [
+            {
+                "role": "system",
+                "content": f"Research gathered {len(ticker_analyses)} "
+                f"ticker analyses, {len(news_items)} news items, "
+                f"{len(macro_indicators)} macro indicators.",
+            }
+        ],
+        "error": error,
     }

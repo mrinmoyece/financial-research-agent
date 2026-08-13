@@ -12,12 +12,12 @@ retried, or scaled.
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from src.config.llm import build_llm
 from src.config.settings import get_settings
-from src.models.state import AgentState, ResearchReport
+from src.models.state import AgentState, ResearchReport, ResearchReportPayload
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,12 @@ Output ONLY valid JSON matching this schema (no markdown fences):
 
 def _build_analyst_prompt(state: AgentState) -> str:
     """Formats all gathered state data into a structured prompt."""
-    sections = [f"# Research Brief: {', '.join(state['tickers'])}",
-                f"**Query**: {state['query']}",
-                f"**Research depth**: {state['research_depth']}",
-                ""]
+    sections = [
+        f"# Research Brief: {', '.join(state['tickers'])}",
+        f"**Query**: {state['query']}",
+        f"**Research depth**: {state['research_depth']}",
+        "",
+    ]
 
     # Ticker fundamentals
     if state.get("ticker_analyses"):
@@ -65,7 +67,7 @@ def _build_analyst_prompt(state: AgentState) -> str:
                 f"### {ta['ticker']} — {ta['company_name']} ({ta['sector']})\n"
                 f"- Price: ${ta['price']:.2f}  |  Market Cap: ${ta['market_cap_billions']:.1f}B\n"
                 f"- P/E: {ta.get('pe_ratio') or 'N/A'}  |  "
-                f"Revenue Growth YoY: {ta.get('revenue_growth_yoy', 0) * 100:.1f}%  |  "
+                f"Revenue Growth YoY: {(ta.get('revenue_growth_yoy') or 0) * 100:.1f}%  |  "
                 f"FCF Margin: {(ta.get('free_cash_flow_margin') or 0) * 100:.1f}%\n"
                 f"- Analyst Consensus: {ta['analyst_consensus']}  |  "
                 f"Target Price: ${ta.get('target_price') or 'N/A'}\n"
@@ -95,9 +97,8 @@ def _build_analyst_prompt(state: AgentState) -> str:
     if state.get("macro_indicators"):
         sections.append("\n## Macroeconomic Context")
         for m in state["macro_indicators"]:
-            sections.append(
-                f"- **{m['name']}**: {m['value']}{m['unit']} ({m['trend']}) — {m['impact_on_equities']}"
-            )
+            label = f"{m['name']}: {m['value']}{m['unit']} ({m['trend']})"
+            sections.append(f"- **{label}** — {m['impact_on_equities']}")
 
     sections.append("\nBased on all data above, produce the investment research report JSON.")
     return "\n".join(sections)
@@ -118,36 +119,34 @@ def analyst_node(state: AgentState) -> dict[str, Any]:
 
     messages = [
         {"role": "system", "content": _ANALYST_SYSTEM_PROMPT},
-        {"role": "user",   "content": prompt},
+        {"role": "user", "content": prompt},
     ]
 
     try:
         response = llm.invoke(messages)
+        if not isinstance(response.content, str):
+            raise ValueError("Analyst response must be plain JSON text")
         raw_json = response.content.strip()
 
         # Strip markdown fences if the model returned them despite instructions
         if raw_json.startswith("```"):
             raw_json = "\n".join(
-                line for line in raw_json.splitlines()
-                if not line.strip().startswith("```")
+                line for line in raw_json.splitlines() if not line.strip().startswith("```")
             ).strip()
 
         report_data = json.loads(raw_json)
-        report = ResearchReport(
-            executive_summary=report_data["executive_summary"],
-            investment_thesis=report_data["investment_thesis"],
-            bull_case=report_data["bull_case"],
-            bear_case=report_data["bear_case"],
-            risk_rating=report_data["risk_rating"],
-            recommended_action=report_data["recommended_action"],
-            price_target_12m=report_data.get("price_target_12m"),
-            confidence_score=float(report_data.get("confidence_score", 0.7)),
-            data_sources_used=report_data.get("data_sources_used", []),
-            generated_at=datetime.now(timezone.utc).isoformat(),
+        validated = ResearchReportPayload.model_validate(
+            {
+                **report_data,
+                "generated_at": datetime.now(UTC).isoformat(),
+            }
         )
+        report = cast(ResearchReport, validated.model_dump())
         logger.info(
             "analyst_node: report generated action=%s risk=%s confidence=%.2f",
-            report["recommended_action"], report["risk_rating"], report["confidence_score"],
+            report["recommended_action"],
+            report["risk_rating"],
+            report["confidence_score"],
         )
         return {"report": report, "error": None}
 
